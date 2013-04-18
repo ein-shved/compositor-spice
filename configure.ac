@@ -176,6 +176,31 @@ if test x$enable_rdp_compositor = xyes; then
   PKG_CHECK_MODULES(RDP_COMPOSITOR, [freerdp >= 1.1.0])
 fi
 
+AC_ARG_ENABLE(spice-compositor, [  --enable-spice-compositor],,
+	      enable_spice_compositor=yes)
+AM_CONDITIONAL(ENABLE_SPICE_COMPOSITOR, test x$enable_spice_compositor = xyes)
+if test x$enable_spice_compositor = xyes; then
+  PKG_CHECK_MODULES([SPICE], 
+    [   
+      spice-server
+      spice-protocol
+    ] ,
+    [
+      AC_SUBST(SPICE_CFLAGS)
+      AC_SUBST(SPICE_LIBS)
+    ],
+  )
+  spice_save_LIBS=$LIBS
+  pice_save_CFLAGS=$CFLAGS
+  CFLAGS=$SPICE_CFLAGS
+  LIBS=$SPICE_LIBS
+  LIBS=$spice_save_LIBS
+  CFLAGS=$spice_save_CFLAGS
+
+  AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
+fi
+
+
 AC_ARG_WITH(cairo-glesv2,
             AS_HELP_STRING([--with-cairo-glesv2],
                            [Use GLESv2 cairo instead of full GL]))
@@ -328,5 +353,6 @@ AC_CONFIG_FILES([Makefile
 		 data/Makefile
 		 protocol/Makefile
 		 man/Makefile
-		 tests/Makefile])
+		 tests/Makefile
+         src/spice/Makefile])
 AC_OUTPUT

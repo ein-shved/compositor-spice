@@ -57,8 +57,14 @@ git-version.h : .FORCE
 
 .FORCE :
 
+SUBDIRS =
+
 if ENABLE_XWAYLAND
-SUBDIRS = xwayland
+SUBDIRS += xwayland
+endif
+
+if ENABLE_SPICE_COMPOSITOR
+SUBDIRS += spice
 endif
 
 DIST_SUBDIRS = xwayland
