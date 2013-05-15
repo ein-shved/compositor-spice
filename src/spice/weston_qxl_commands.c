@@ -32,7 +32,7 @@
 #include "weston_spice_interfaces.h"
 
 //TODO implement
-typedef struct UndeclaredClipList ClipList;
+typedef pixman_region32_t ClipList;
 
 struct surface_create_cmd {
     struct spice_release_info base;
@@ -204,9 +204,10 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
         ClipList *clip_rects, intptr_t release_info,
         intptr_t image, QXLDrawable *drawable, uint32_t mm_time)
 {
+    /*
     uint32_t bw = bbox->right - bbox->left;
     uint32_t bh = bbox->bottom - bbox->top;
-
+    */
     drawable->surface_id = surface_id; 
     drawable->bbox = *bbox;
     //FIXME: Next line is forced nail.
@@ -223,10 +224,17 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
 
     drawable->u.copy.rop_descriptor     = SPICE_ROPD_OP_PUT;
     drawable->u.copy.src_bitmap         = (intptr_t)image;
-    drawable->u.copy.src_area.top       = 0;
-    drawable->u.copy.src_area.left      = 0;
-    drawable->u.copy.src_area.right     = bw;
-    drawable->u.copy.src_area.bottom    = bh;
+    drawable->u.copy.src_area.top       = clip_rects->extents.y1;
+    drawable->u.copy.src_area.left      = clip_rects->extents.x1;
+    drawable->u.copy.src_area.right     = clip_rects->extents.x2;
+    drawable->u.copy.src_area.bottom    = clip_rects->extents.y2;
+
+    dprint (3, "damage: (%d,%d) (%d,%d) %lx", 
+        clip_rects->extents.x1,
+        clip_rects->extents.y1,
+        clip_rects->extents.x2,
+        clip_rects->extents.y2,
+        (long unsigned) clip_rects->data );       
 
     return 0;
 }
@@ -245,7 +253,7 @@ spice_create_image (struct spice_compositor *c)
 int
 spice_paint_image (struct spice_compositor *c, uint32_t image_id,
         int x, int y, int width, int height,
-        intptr_t data, int32_t stride, pixman_region32_t *region )
+        intptr_t data, int32_t stride, pixman_region32_t *damage )
 {
     struct create_image_cmd *cmd;
     QXLImage *image;
@@ -266,7 +274,7 @@ spice_paint_image (struct spice_compositor *c, uint32_t image_id,
     image = &cmd->image;
     cmd->base.destructor = release_simple;
 
-    if ( make_drawable (&bbox, surface_id, NULL, 
+    if ( make_drawable (&bbox, surface_id, damage, 
             (intptr_t) cmd, (intptr_t) image, drawable,
             c->mm_clock) < 0 )
     {

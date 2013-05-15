@@ -261,7 +261,7 @@ spice_destroy (struct weston_compositor *ec)
     c->worker->stop (c->worker);
 
     /* TODO: after calling next line double free detect.
-     * recognize, recognize why?
+     * recognize, why?
      */
     //spice_server_destroy(c->spice_server);
 
