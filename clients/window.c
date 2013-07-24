@@ -21,13 +21,12 @@
  * OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
-
-#include "../config.h"
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -85,6 +84,7 @@ struct display {
 	struct wl_display *display;
 	struct wl_registry *registry;
 	struct wl_compositor *compositor;
+	struct wl_subcompositor *subcompositor;
 	struct wl_shell *shell;
 	struct wl_shm *shm;
 	struct wl_data_device_manager *data_device_manager;
@@ -150,13 +150,14 @@ struct toysurface {
 	 * Prepare the surface for drawing. Makes sure there is a surface
 	 * of the right size available for rendering, and returns it.
 	 * dx,dy are the x,y of wl_surface.attach.
-	 * width,height are the new surface size.
+	 * width,height are the new buffer size.
 	 * If flags has SURFACE_HINT_RESIZE set, the user is
 	 * doing continuous resizing.
 	 * Returns the Cairo surface to draw to.
 	 */
 	cairo_surface_t *(*prepare)(struct toysurface *base, int dx, int dy,
-				    int width, int height, uint32_t flags);
+				    int32_t width, int32_t height, uint32_t flags,
+				    enum wl_output_transform buffer_transform, int32_t buffer_scale);
 
 	/*
 	 * Post the surface to the server, returning the server allocation
@@ -164,6 +165,7 @@ struct toysurface {
 	 * after calling this.
 	 */
 	void (*swap)(struct toysurface *base,
+		     enum wl_output_transform buffer_transform, int32_t buffer_scale,
 		     struct rectangle *server_allocation);
 
 	/*
@@ -189,8 +191,14 @@ struct surface {
 	struct window *window;
 
 	struct wl_surface *surface;
+	struct wl_subsurface *subsurface;
+	int synchronized;
+	int synchronized_default;
 	struct toysurface *toysurface;
 	struct widget *widget;
+	int redraw_needed;
+	struct wl_callback *frame_cb;
+	uint32_t last_time;
 
 	struct rectangle allocation;
 	struct rectangle server_allocation;
@@ -200,8 +208,11 @@ struct surface {
 
 	enum window_buffer_type buffer_type;
 	enum wl_output_transform buffer_transform;
+	int32_t buffer_scale;
 
 	cairo_surface_t *cairo_surface;
+
+	struct wl_list link;
 };
 
 struct window {
@@ -214,8 +225,8 @@ struct window {
 	struct rectangle pending_allocation;
 	int x, y;
 	int resize_edges;
-	int redraw_scheduled;
 	int redraw_needed;
+	int redraw_task_scheduled;
 	struct task redraw_task;
 	int resize_needed;
 	int saved_type;
@@ -236,9 +247,11 @@ struct window {
 
 	struct surface *main_surface;
 	struct wl_shell_surface *shell_surface;
-	struct wl_callback *frame_cb;
 
 	struct frame *frame;
+
+	/* struct surface::link, contains also main_surface */
+	struct wl_list subsurface_list;
 
 	void *user_data;
 	struct wl_list link;
@@ -310,6 +323,7 @@ struct output {
 	struct rectangle allocation;
 	struct wl_list link;
 	int transform;
+	int scale;
 
 	display_output_handler_t destroy_handler;
 	void *user_data;
@@ -408,6 +422,93 @@ enum window_location {
 
 static const cairo_user_data_key_t shm_surface_data_key;
 
+/* #define DEBUG */
+
+#ifdef DEBUG
+
+static void
+debug_print(void *proxy, int line, const char *func, const char *fmt, ...)
+__attribute__ ((format (printf, 4, 5)));
+
+static void
+debug_print(void *proxy, int line, const char *func, const char *fmt, ...)
+{
+	va_list ap;
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	fprintf(stderr, "%8ld.%03ld ",
+		(long)tv.tv_sec & 0xffff, (long)tv.tv_usec / 1000);
+
+	if (proxy)
+		fprintf(stderr, "%s@%d ",
+			wl_proxy_get_class(proxy), wl_proxy_get_id(proxy));
+
+	/*fprintf(stderr, __FILE__ ":%d:%s ", line, func);*/
+	fprintf(stderr, "%s ", func);
+
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+}
+
+#define DBG(fmt, ...) \
+	debug_print(NULL, __LINE__, __func__, fmt, ##__VA_ARGS__)
+
+#define DBG_OBJ(obj, fmt, ...) \
+	debug_print(obj, __LINE__, __func__, fmt, ##__VA_ARGS__)
+
+#else
+
+#define DBG(...) do {} while (0)
+#define DBG_OBJ(...) do {} while (0)
+
+#endif
+
+static void
+surface_to_buffer_size (enum wl_output_transform buffer_transform, int32_t buffer_scale, int32_t *width, int32_t *height)
+{
+	int32_t tmp;
+
+	switch (buffer_transform) {
+	case WL_OUTPUT_TRANSFORM_90:
+	case WL_OUTPUT_TRANSFORM_270:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+		tmp = *width;
+		*width = *height;
+		*height = tmp;
+		break;
+	default:
+		break;
+	}
+
+	*width *= buffer_scale;
+	*height *= buffer_scale;
+}
+
+static void
+buffer_to_surface_size (enum wl_output_transform buffer_transform, int32_t buffer_scale, int32_t *width, int32_t *height)
+{
+	int32_t tmp;
+
+	switch (buffer_transform) {
+	case WL_OUTPUT_TRANSFORM_90:
+	case WL_OUTPUT_TRANSFORM_270:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+		tmp = *width;
+		*width = *height;
+		*height = tmp;
+		break;
+	default:
+		break;
+	}
+
+	*width /= buffer_scale;
+	*height /= buffer_scale;
+}
+
 #ifdef HAVE_CAIRO_EGL
 
 struct egl_window_surface {
@@ -427,9 +528,12 @@ to_egl_window_surface(struct toysurface *base)
 
 static cairo_surface_t *
 egl_window_surface_prepare(struct toysurface *base, int dx, int dy,
-			   int width, int height, uint32_t flags)
+			   int32_t width, int32_t height, uint32_t flags,
+			   enum wl_output_transform buffer_transform, int32_t buffer_scale)
 {
 	struct egl_window_surface *surface = to_egl_window_surface(base);
+
+	surface_to_buffer_size (buffer_transform, buffer_scale, &width, &height);
 
 	wl_egl_window_resize(surface->egl_window, width, height, dx, dy);
 	cairo_gl_surface_set_size(surface->cairo_surface, width, height);
@@ -439,6 +543,7 @@ egl_window_surface_prepare(struct toysurface *base, int dx, int dy,
 
 static void
 egl_window_surface_swap(struct toysurface *base,
+			enum wl_output_transform buffer_transform, int32_t buffer_scale,
 			struct rectangle *server_allocation)
 {
 	struct egl_window_surface *surface = to_egl_window_surface(base);
@@ -447,6 +552,10 @@ egl_window_surface_swap(struct toysurface *base,
 	wl_egl_window_get_attached_size(surface->egl_window,
 					&server_allocation->width,
 					&server_allocation->height);
+
+	buffer_to_surface_size (buffer_transform, buffer_scale,
+				&server_allocation->width,
+				&server_allocation->height);
 }
 
 static int
@@ -820,6 +929,8 @@ shm_surface_leaf_release(struct shm_surface_leaf *leaf)
 	memset(leaf, 0, sizeof *leaf);
 }
 
+#define MAX_LEAVES 3
+
 struct shm_surface {
 	struct toysurface base;
 	struct display *display;
@@ -827,7 +938,7 @@ struct shm_surface {
 	uint32_t flags;
 	int dx, dy;
 
-	struct shm_surface_leaf leaf[2];
+	struct shm_surface_leaf leaf[MAX_LEAVES];
 	struct shm_surface_leaf *current;
 };
 
@@ -838,19 +949,63 @@ to_shm_surface(struct toysurface *base)
 }
 
 static void
+shm_surface_buffer_state_debug(struct shm_surface *surface, const char *msg)
+{
+#ifdef DEBUG
+	struct shm_surface_leaf *leaf;
+	char bufs[MAX_LEAVES + 1];
+	int i;
+
+	for (i = 0; i < MAX_LEAVES; i++) {
+		leaf = &surface->leaf[i];
+
+		if (leaf->busy)
+			bufs[i] = 'b';
+		else if (leaf->cairo_surface)
+			bufs[i] = 'a';
+		else
+			bufs[i] = ' ';
+	}
+
+	bufs[MAX_LEAVES] = '\0';
+	DBG_OBJ(surface->surface, "%s, leaves [%s]\n", msg, bufs);
+#endif
+}
+
+static void
 shm_surface_buffer_release(void *data, struct wl_buffer *buffer)
 {
 	struct shm_surface *surface = data;
+	struct shm_surface_leaf *leaf;
+	int i;
+	int free_found;
 
-	if (surface->leaf[0].data->buffer == buffer)
-		surface->leaf[0].busy = 0;
-	else if (surface->leaf[1].data->buffer == buffer)
-		surface->leaf[1].busy = 0;
-	else
-		assert(0 && "shm_surface_buffer_release: unknown buffer");
+	shm_surface_buffer_state_debug(surface, "buffer_release before");
 
-	if (!surface->leaf[0].busy && !surface->leaf[1].busy)
-		shm_surface_leaf_release(&surface->leaf[1]);
+	for (i = 0; i < MAX_LEAVES; i++) {
+		leaf = &surface->leaf[i];
+		if (leaf->data && leaf->data->buffer == buffer) {
+			leaf->busy = 0;
+			break;
+		}
+	}
+	assert(i < MAX_LEAVES && "unknown buffer released");
+
+	/* Leave one free leaf with storage, release others */
+	free_found = 0;
+	for (i = 0; i < MAX_LEAVES; i++) {
+		leaf = &surface->leaf[i];
+
+		if (!leaf->cairo_surface || leaf->busy)
+			continue;
+
+		if (!free_found)
+			free_found = 1;
+		else
+			shm_surface_leaf_release(leaf);
+	}
+
+	shm_surface_buffer_state_debug(surface, "buffer_release  after");
 }
 
 static const struct wl_buffer_listener shm_surface_buffer_listener = {
@@ -859,31 +1014,33 @@ static const struct wl_buffer_listener shm_surface_buffer_listener = {
 
 static cairo_surface_t *
 shm_surface_prepare(struct toysurface *base, int dx, int dy,
-		    int width, int height, uint32_t flags)
+		    int32_t width, int32_t height, uint32_t flags,
+		    enum wl_output_transform buffer_transform, int32_t buffer_scale)
 {
 	int resize_hint = !!(flags & SURFACE_HINT_RESIZE);
 	struct shm_surface *surface = to_shm_surface(base);
-	struct rectangle rect = { 0, 0, width, height };
-	struct shm_surface_leaf *leaf;
+	struct rectangle rect = { 0};
+	struct shm_surface_leaf *leaf = NULL;
+	int i;
 
 	surface->dx = dx;
 	surface->dy = dy;
 
-	/* See shm_surface_buffer_release() */
-	if (!surface->leaf[0].busy && !surface->leaf[1].busy &&
-	    surface->leaf[1].cairo_surface) {
-		fprintf(stderr, "window.c:%s: TODO: release leaf[1]\n",
-			__func__);
-	}
+	/* pick a free buffer, preferrably one that already has storage */
+	for (i = 0; i < MAX_LEAVES; i++) {
+		if (surface->leaf[i].busy)
+			continue;
 
-	/* pick a free buffer from the two */
-	if (!surface->leaf[0].busy)
-		leaf = &surface->leaf[0];
-	else if (!surface->leaf[1].busy)
-		leaf = &surface->leaf[1];
-	else {
-		fprintf(stderr, "%s: both buffers are held by the server.\n",
+		if (!leaf || surface->leaf[i].cairo_surface)
+			leaf = &surface->leaf[i];
+	}
+	DBG_OBJ(surface->surface, "pick leaf %d\n",
+		(int)(leaf - &surface->leaf[0]));
+
+	if (!leaf) {
+		fprintf(stderr, "%s: all buffers are held by the server.\n",
 			__func__);
+		exit(1);
 		return NULL;
 	}
 
@@ -894,6 +1051,8 @@ shm_surface_prepare(struct toysurface *base, int dx, int dy,
 		leaf->resize_pool = NULL;
 	}
 
+	surface_to_buffer_size (buffer_transform, buffer_scale, &width, &height);
+
 	if (leaf->cairo_surface &&
 	    cairo_image_surface_get_width(leaf->cairo_surface) == width &&
 	    cairo_image_surface_get_height(leaf->cairo_surface) == height)
@@ -902,6 +1061,7 @@ shm_surface_prepare(struct toysurface *base, int dx, int dy,
 	if (leaf->cairo_surface)
 		cairo_surface_destroy(leaf->cairo_surface);
 
+#ifdef USE_RESIZE_POOL
 	if (resize_hint && !leaf->resize_pool) {
 		/* Create a big pool to allocate from, while continuously
 		 * resizing. Mmapping a new pool in the server
@@ -912,6 +1072,10 @@ shm_surface_prepare(struct toysurface *base, int dx, int dy,
 		leaf->resize_pool = shm_pool_create(surface->display,
 						    6 * 1024 * 1024);
 	}
+#endif
+
+	rect.width = width;
+	rect.height = height;
 
 	leaf->cairo_surface =
 		display_create_shm_surface(surface->display, &rect,
@@ -929,6 +1093,7 @@ out:
 
 static void
 shm_surface_swap(struct toysurface *base,
+		 enum wl_output_transform buffer_transform, int32_t buffer_scale,
 		 struct rectangle *server_allocation)
 {
 	struct shm_surface *surface = to_shm_surface(base);
@@ -939,11 +1104,18 @@ shm_surface_swap(struct toysurface *base,
 	server_allocation->height =
 		cairo_image_surface_get_height(leaf->cairo_surface);
 
+	buffer_to_surface_size (buffer_transform, buffer_scale,
+				&server_allocation->width,
+				&server_allocation->height);
+
 	wl_surface_attach(surface->surface, leaf->data->buffer,
 			  surface->dx, surface->dy);
 	wl_surface_damage(surface->surface, 0, 0,
 			  server_allocation->width, server_allocation->height);
 	wl_surface_commit(surface->surface);
+
+	DBG_OBJ(surface->surface, "leaf %d busy\n",
+		(int)(leaf - &surface->leaf[0]));
 
 	leaf->busy = 1;
 	surface->current = NULL;
@@ -964,9 +1136,10 @@ static void
 shm_surface_destroy(struct toysurface *base)
 {
 	struct shm_surface *surface = to_shm_surface(base);
+	int i;
 
-	shm_surface_leaf_release(&surface->leaf[0]);
-	shm_surface_leaf_release(&surface->leaf[1]);
+	for (i = 0; i < MAX_LEAVES; i++)
+		shm_surface_leaf_release(&surface->leaf[i]);
 
 	free(surface);
 }
@@ -976,6 +1149,7 @@ shm_surface_create(struct display *display, struct wl_surface *wl_surface,
 		   uint32_t flags, struct rectangle *rectangle)
 {
 	struct shm_surface *surface;
+	DBG_OBJ(wl_surface, "\n");
 
 	surface = calloc(1, sizeof *surface);
 	if (!surface)
@@ -1001,17 +1175,20 @@ shm_surface_create(struct display *display, struct wl_surface *wl_surface,
 
 static const char *bottom_left_corners[] = {
 	"bottom_left_corner",
-	"sw-resize"
+	"sw-resize",
+	"size_bdiag"
 };
 
 static const char *bottom_right_corners[] = {
 	"bottom_right_corner",
-	"se-resize"
+	"se-resize",
+	"size_fdiag"
 };
 
 static const char *bottom_sides[] = {
 	"bottom_side",
-	"s-resize"
+	"s-resize",
+	"size_ver"
 };
 
 static const char *grabbings[] = {
@@ -1029,27 +1206,32 @@ static const char *left_ptrs[] = {
 
 static const char *left_sides[] = {
 	"left_side",
-	"w-resize"
+	"w-resize",
+	"size_hor"
 };
 
 static const char *right_sides[] = {
 	"right_side",
-	"e-resize"
+	"e-resize",
+	"size_hor"
 };
 
 static const char *top_left_corners[] = {
 	"top_left_corner",
-	"nw-resize"
+	"nw-resize",
+	"size_fdiag"
 };
 
 static const char *top_right_corners[] = {
 	"top_right_corner",
-	"ne-resize"
+	"ne-resize",
+	"size_bdiag"
 };
 
 static const char *top_sides[] = {
 	"top_side",
-	"n-resize"
+	"n-resize",
+	"size_ver"
 };
 
 static const char *xterms[] = {
@@ -1095,7 +1277,7 @@ static const struct cursor_alternatives cursors[] = {
 static void
 create_cursors(struct display *display)
 {
-	char *config_file;
+	int config_fd;
 	char *theme = NULL;
 	unsigned int size = 32;
 	unsigned int i, j;
@@ -1108,9 +1290,9 @@ create_cursors(struct display *display)
 		{ "shell", shell_keys, ARRAY_LENGTH(shell_keys), NULL },
 	};
 
-	config_file = config_file_path("weston.ini");
-	parse_config_file(config_file, cs, ARRAY_LENGTH(cs), NULL);
-	free(config_file);
+	config_fd = open_config_file("weston.ini");
+	parse_config_file(config_fd, cs, ARRAY_LENGTH(cs), NULL);
+	close(config_fd);
 
 	display->cursor_theme = wl_cursor_theme_load(theme, size, display->shm);
 	display->cursors =
@@ -1166,6 +1348,7 @@ surface_flush(struct surface *surface)
 	}
 
 	surface->toysurface->swap(surface->toysurface,
+				  surface->buffer_transform, surface->buffer_scale,
 				  &surface->server_allocation);
 
 	cairo_surface_destroy(surface->cairo_surface);
@@ -1181,10 +1364,19 @@ window_has_focus(struct window *window)
 static void
 window_flush(struct window *window)
 {
+	struct surface *surface;
+
 	if (window->type == TYPE_NONE) {
 		window->type = TYPE_TOPLEVEL;
 		if (window->shell_surface)
 			wl_shell_surface_set_toplevel(window->shell_surface);
+	}
+
+	wl_list_for_each(surface, &window->subsurface_list, link) {
+		if (surface == window->main_surface)
+			continue;
+
+		surface_flush(surface);
 	}
 
 	surface_flush(window->main_surface);
@@ -1202,18 +1394,6 @@ surface_create_surface(struct surface *surface, int dx, int dy, uint32_t flags)
 	struct display *display = surface->window->display;
 	struct rectangle allocation = surface->allocation;
 
-	switch (surface->buffer_transform) {
-	case WL_OUTPUT_TRANSFORM_90:
-	case WL_OUTPUT_TRANSFORM_270:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		allocation.width = surface->allocation.height;
-		allocation.height = surface->allocation.width;
-		break;
-	default:
-		break;
-	}
-
 	if (!surface->toysurface && display->dpy &&
 	    surface->buffer_type == WINDOW_BUFFER_TYPE_EGL_WINDOW) {
 		surface->toysurface =
@@ -1230,7 +1410,8 @@ surface_create_surface(struct surface *surface, int dx, int dy, uint32_t flags)
 
 	surface->cairo_surface = surface->toysurface->prepare(
 		surface->toysurface, dx, dy,
-		allocation.width, allocation.height, flags);
+		allocation.width, allocation.height, flags,
+		surface->buffer_transform, surface->buffer_scale);
 }
 
 static void
@@ -1272,22 +1453,60 @@ window_set_buffer_transform(struct window *window,
 					transform);
 }
 
+void
+window_set_buffer_scale(struct window *window,
+			int32_t scale)
+{
+	window->main_surface->buffer_scale = scale;
+	wl_surface_set_buffer_scale(window->main_surface->surface,
+				    scale);
+}
+
+uint32_t
+window_get_buffer_scale(struct window *window)
+{
+	return window->main_surface->buffer_scale;
+}
+
+uint32_t
+window_get_output_scale(struct window *window)
+{
+	struct window_output *window_output;
+	struct window_output *window_output_tmp;
+	int scale = 1;
+
+	wl_list_for_each_safe(window_output, window_output_tmp,
+			      &window->window_output_list, link) {
+		if (window_output->output->scale > scale)
+			scale = window_output->output->scale;
+	}
+
+	return scale;
+}
+
 static void frame_destroy(struct frame *frame);
 
 static void
 surface_destroy(struct surface *surface)
 {
+	if (surface->frame_cb)
+		wl_callback_destroy(surface->frame_cb);
+
 	if (surface->input_region)
 		wl_region_destroy(surface->input_region);
 
 	if (surface->opaque_region)
 		wl_region_destroy(surface->opaque_region);
 
+	if (surface->subsurface)
+		wl_subsurface_destroy(surface->subsurface);
+
 	wl_surface_destroy(surface->surface);
 
 	if (surface->toysurface)
 		surface->toysurface->destroy(surface->toysurface);
 
+	wl_list_remove(&surface->link);
 	free(surface);
 }
 
@@ -1299,8 +1518,7 @@ window_destroy(struct window *window)
 	struct window_output *window_output;
 	struct window_output *window_output_tmp;
 
-	if (window->redraw_scheduled)
-		wl_list_remove(&window->redraw_task.link);
+	wl_list_remove(&window->redraw_task.link);
 
 	wl_list_for_each(input, &display->input_list, link) {
 		if (input->pointer_focus == window)
@@ -1327,8 +1545,6 @@ window_destroy(struct window *window)
 
 	wl_list_remove(&window->link);
 
-	if (window->frame_cb)
-		wl_callback_destroy(window->frame_cb);
 	free(window->title);
 	free(window);
 }
@@ -1357,7 +1573,16 @@ widget_find_widget(struct widget *widget, int32_t x, int32_t y)
 static struct widget *
 window_find_widget(struct window *window, int32_t x, int32_t y)
 {
-	return widget_find_widget(window->main_surface->widget, x, y);
+	struct surface *surface;
+	struct widget *widget;
+
+	wl_list_for_each(surface, &window->subsurface_list, link) {
+		widget = widget_find_widget(surface->widget, x, y);
+		if (widget)
+			return widget;
+	}
+
+	return NULL;
 }
 
 static struct widget *
@@ -1407,7 +1632,12 @@ void
 widget_destroy(struct widget *widget)
 {
 	struct display *display = widget->window->display;
+	struct surface *surface = widget->surface;
 	struct input *input;
+
+	/* Destroy the sub-surface along with the root widget */
+	if (surface->widget == widget && surface->subsurface)
+		surface_destroy(widget->surface);
 
 	if (widget->tooltip) {
 		free(widget->tooltip);
@@ -1479,16 +1709,127 @@ widget_get_cairo_surface(struct widget *widget)
 	return surface->cairo_surface;
 }
 
+static void
+widget_cairo_update_transform(struct widget *widget, cairo_t *cr)
+{
+	struct surface *surface = widget->surface;
+	double angle;
+	cairo_matrix_t m;
+	enum wl_output_transform transform;
+	int surface_width, surface_height;
+	int translate_x, translate_y;
+	int32_t scale;
+
+	surface_width = surface->allocation.width;
+	surface_height = surface->allocation.height;
+
+	transform = surface->buffer_transform;
+	scale = surface->buffer_scale;
+
+	switch (transform) {
+	case WL_OUTPUT_TRANSFORM_FLIPPED:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+		cairo_matrix_init(&m, -1, 0, 0, 1, 0, 0);
+		break;
+	default:
+		cairo_matrix_init_identity(&m);
+		break;
+	}
+
+	switch (transform) {
+	case WL_OUTPUT_TRANSFORM_NORMAL:
+	default:
+		angle = 0;
+		translate_x = 0;
+		translate_y = 0;
+		break;
+	case WL_OUTPUT_TRANSFORM_FLIPPED:
+		angle = 0;
+		translate_x = surface_width;
+		translate_y = 0;
+		break;
+	case WL_OUTPUT_TRANSFORM_90:
+		angle = M_PI_2;
+		translate_x = surface_height;
+		translate_y = 0;
+		break;
+	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+		angle = M_PI_2;
+		translate_x = surface_height;
+		translate_y = surface_width;
+		break;
+	case WL_OUTPUT_TRANSFORM_180:
+		angle = M_PI;
+		translate_x = surface_width;
+		translate_y = surface_height;
+		break;
+	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
+		angle = M_PI;
+		translate_x = 0;
+		translate_y = surface_height;
+		break;
+	case WL_OUTPUT_TRANSFORM_270:
+		angle = M_PI + M_PI_2;
+		translate_x = 0;
+		translate_y = surface_width;
+		break;
+	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
+		angle = M_PI + M_PI_2;
+		translate_x = 0;
+		translate_y = 0;
+		break;
+	}
+
+	cairo_scale(cr, scale, scale);
+	cairo_translate(cr, translate_x, translate_y);
+	cairo_rotate(cr, angle);
+	cairo_transform(cr, &m);
+}
+
 cairo_t *
 widget_cairo_create(struct widget *widget)
 {
+	struct surface *surface = widget->surface;
 	cairo_surface_t *cairo_surface;
 	cairo_t *cr;
 
 	cairo_surface = widget_get_cairo_surface(widget);
 	cr = cairo_create(cairo_surface);
 
+	widget_cairo_update_transform(widget, cr);
+
+	cairo_translate(cr, -surface->allocation.x, -surface->allocation.y);
+
 	return cr;
+}
+
+struct wl_surface *
+widget_get_wl_surface(struct widget *widget)
+{
+	return widget->surface->surface;
+}
+
+uint32_t
+widget_get_last_time(struct widget *widget)
+{
+	return widget->surface->last_time;
+}
+
+void
+widget_input_region_add(struct widget *widget, const struct rectangle *rect)
+{
+	struct wl_compositor *comp = widget->window->display->compositor;
+	struct surface *surface = widget->surface;
+
+	if (!surface->input_region)
+		surface->input_region = wl_compositor_create_region(comp);
+
+	if (rect) {
+		wl_region_add(surface->input_region,
+			      rect->x, rect->y, rect->width, rect->height);
+	}
 }
 
 void
@@ -1538,10 +1879,15 @@ widget_set_axis_handler(struct widget *widget,
 	widget->axis_handler = handler;
 }
 
+static void
+window_schedule_redraw_task(struct window *window);
+
 void
 widget_schedule_redraw(struct widget *widget)
 {
-	window_schedule_redraw(widget->window);
+	DBG_OBJ(widget->surface->surface, "widget %p\n", widget);
+	widget->surface->redraw_needed = 1;
+	window_schedule_redraw_task(widget->window);
 }
 
 cairo_surface_t *
@@ -2207,7 +2553,7 @@ frame_button_handler(struct widget *widget,
 	struct display *display = window->display;
 	int location;
 
-	if (window->type != TYPE_TOPLEVEL)
+	if (state != WL_POINTER_BUTTON_STATE_PRESSED)
 		return;
 
 	location = theme_get_location(display->theme, input->sx, input->sy,
@@ -2217,7 +2563,7 @@ frame_button_handler(struct widget *widget,
 				      THEME_FRAME_MAXIMIZED : 0);
 
 	if (window->display->shell && button == BTN_LEFT &&
-	    state == WL_POINTER_BUTTON_STATE_PRESSED) {
+	    window->type == TYPE_TOPLEVEL) {
 		switch (location) {
 		case THEME_LOCATION_TITLEBAR:
 			if (!window->shell_surface)
@@ -2246,7 +2592,8 @@ frame_button_handler(struct widget *widget,
 			break;
 		}
 	} else if (button == BTN_RIGHT &&
-		   state == WL_POINTER_BUTTON_STATE_PRESSED) {
+		   (window->type == TYPE_TOPLEVEL ||
+		    window->type == TYPE_MAXIMIZED)) {
 		window_show_frame_menu(window, input, time);
 	}
 }
@@ -2448,6 +2795,14 @@ pointer_handle_motion(void *data, struct wl_pointer *pointer,
 	int cursor;
 	float sx = wl_fixed_to_double(sx_w);
 	float sy = wl_fixed_to_double(sy_w);
+
+	/* when making the window smaller - e.g. after a unmaximise we might
+	 * still have a pending motion event that the compositor has picked
+	 * based on the old surface dimensions
+	 */
+	if (sx > window->main_surface->allocation.width ||
+	    sy > window->main_surface->allocation.height)
+		return;
 
 	input->sx = sx;
 	input->sy = sy;
@@ -2720,6 +3075,10 @@ keyboard_handle_modifiers(void *data, struct wl_keyboard *keyboard,
 {
 	struct input *input = data;
 	xkb_mod_mask_t mask;
+
+	/* If we're not using a keymap, then we don't handle PC-style modifiers */
+	if (!input->xkb.keymap)
+		return;
 
 	xkb_state_update_mask(input->xkb.state, mods_depressed, mods_latched,
 			      mods_locked, 0, 0, group);
@@ -3204,6 +3563,36 @@ window_move(struct window *window, struct input *input, uint32_t serial)
 }
 
 static void
+surface_set_synchronized(struct surface *surface)
+{
+	if (!surface->subsurface)
+		return;
+
+	if (surface->synchronized)
+		return;
+
+	wl_subsurface_set_sync(surface->subsurface);
+	surface->synchronized = 1;
+}
+
+static void
+surface_set_synchronized_default(struct surface *surface)
+{
+	if (!surface->subsurface)
+		return;
+
+	if (surface->synchronized == surface->synchronized_default)
+		return;
+
+	if (surface->synchronized_default)
+		wl_subsurface_set_sync(surface->subsurface);
+	else
+		wl_subsurface_set_desync(surface->subsurface);
+
+	surface->synchronized = surface->synchronized_default;
+}
+
+static void
 surface_resize(struct surface *surface)
 {
 	struct widget *widget = surface->widget;
@@ -3225,11 +3614,18 @@ surface_resize(struct surface *surface)
 				       widget->allocation.height,
 				       widget->user_data);
 
+	if (surface->subsurface &&
+	    (surface->allocation.x != widget->allocation.x ||
+	     surface->allocation.y != widget->allocation.y)) {
+		wl_subsurface_set_position(surface->subsurface,
+					   widget->allocation.x,
+					   widget->allocation.y);
+	}
 	if (surface->allocation.width != widget->allocation.width ||
 	    surface->allocation.height != widget->allocation.height) {
-		surface->allocation = widget->allocation;
 		window_schedule_redraw(widget->window);
 	}
+	surface->allocation = widget->allocation;
 
 	if (widget->opaque)
 		wl_region_add(surface->opaque_region, 0, 0,
@@ -3238,9 +3634,50 @@ surface_resize(struct surface *surface)
 }
 
 static void
+hack_prevent_EGL_sub_surface_deadlock(struct window *window)
+{
+	/*
+	 * This hack should be removed, when EGL respects
+	 * eglSwapInterval(0).
+	 *
+	 * If this window has sub-surfaces, especially a free-running
+	 * EGL-widget, we need to post the parent surface once with
+	 * all the old state to guarantee, that the EGL-widget will
+	 * receive its frame callback soon. Otherwise, a forced call
+	 * to eglSwapBuffers may end up blocking, waiting for a frame
+	 * event that will never come, because we will commit the parent
+	 * surface with all new state only after eglSwapBuffers returns.
+	 *
+	 * This assumes, that:
+	 * 1. When the EGL widget's resize hook is called, it pauses.
+	 * 2. When the EGL widget's redraw hook is called, it forces a
+	 *    repaint and a call to eglSwapBuffers(), and maybe resumes.
+	 * In a single threaded application condition 1 is a no-op.
+	 *
+	 * XXX: This should actually be after the surface_resize() calls,
+	 * but cannot, because then it would commit the incomplete state
+	 * accumulated from the widget resize hooks.
+	 */
+	if (window->subsurface_list.next != &window->main_surface->link ||
+	    window->subsurface_list.prev != &window->main_surface->link)
+		wl_surface_commit(window->main_surface->surface);
+}
+
+static void
 idle_resize(struct window *window)
 {
+	struct surface *surface;
+
 	window->resize_needed = 0;
+	window->redraw_needed = 1;
+
+	DBG("from %dx%d to %dx%d\n",
+	    window->main_surface->server_allocation.width,
+	    window->main_surface->server_allocation.height,
+	    window->pending_allocation.width,
+	    window->pending_allocation.height);
+
+	hack_prevent_EGL_sub_surface_deadlock(window);
 
 	widget_set_allocation(window->main_surface->widget,
 			      window->pending_allocation.x,
@@ -3249,6 +3686,19 @@ idle_resize(struct window *window)
 			      window->pending_allocation.height);
 
 	surface_resize(window->main_surface);
+
+	/* The main surface is in the list, too. Main surface's
+	 * resize_handler is responsible for calling widget_set_allocation()
+	 * on all sub-surface root widgets, so they will be resized
+	 * properly.
+	 */
+	wl_list_for_each(surface, &window->subsurface_list, link) {
+		if (surface == window->main_surface)
+			continue;
+
+		surface_set_synchronized(surface);
+		surface_resize(surface);
+	}
 }
 
 void
@@ -3343,14 +3793,19 @@ widget_redraw(struct widget *widget)
 static void
 frame_callback(void *data, struct wl_callback *callback, uint32_t time)
 {
-	struct window *window = data;
+	struct surface *surface = data;
 
-	assert(callback == window->frame_cb);
+	assert(callback == surface->frame_cb);
+	DBG_OBJ(callback, "done\n");
 	wl_callback_destroy(callback);
-	window->frame_cb = 0;
-	window->redraw_scheduled = 0;
-	if (window->redraw_needed)
-		window_schedule_redraw(window);
+	surface->frame_cb = NULL;
+
+	surface->last_time = time;
+
+	if (surface->redraw_needed || surface->window->redraw_needed) {
+		DBG_OBJ(surface->surface, "window_schedule_redraw_task\n");
+		window_schedule_redraw_task(surface->window);
+	}
 }
 
 static const struct wl_callback_listener listener = {
@@ -3358,33 +3813,88 @@ static const struct wl_callback_listener listener = {
 };
 
 static void
+surface_redraw(struct surface *surface)
+{
+	DBG_OBJ(surface->surface, "begin\n");
+
+	if (!surface->window->redraw_needed && !surface->redraw_needed)
+		return;
+
+	/* Whole-window redraw forces a redraw even if the previous has
+	 * not yet hit the screen.
+	 */
+	if (surface->frame_cb) {
+		if (!surface->window->redraw_needed)
+			return;
+
+		DBG_OBJ(surface->frame_cb, "cancelled\n");
+		wl_callback_destroy(surface->frame_cb);
+	}
+
+	surface->frame_cb = wl_surface_frame(surface->surface);
+	wl_callback_add_listener(surface->frame_cb, &listener, surface);
+	DBG_OBJ(surface->frame_cb, "new\n");
+
+	surface->redraw_needed = 0;
+	DBG_OBJ(surface->surface, "-> widget_redraw\n");
+	widget_redraw(surface->widget);
+	DBG_OBJ(surface->surface, "done\n");
+}
+
+static void
 idle_redraw(struct task *task, uint32_t events)
 {
 	struct window *window = container_of(task, struct window, redraw_task);
+	struct surface *surface;
 
-	if (window->resize_needed)
-		idle_resize(window);
+	DBG(" --------- \n");
 
-	widget_redraw(window->main_surface->widget);
-	window->redraw_needed = 0;
 	wl_list_init(&window->redraw_task.link);
+	window->redraw_task_scheduled = 0;
 
-	window->frame_cb = wl_surface_frame(window->main_surface->surface);
-	wl_callback_add_listener(window->frame_cb, &listener, window);
+	if (window->resize_needed) {
+		/* throttle resizing to the main surface display */
+		if (window->main_surface->frame_cb) {
+			DBG_OBJ(window->main_surface->frame_cb, "pending\n");
+			return;
+		}
+
+		idle_resize(window);
+	}
+
+	wl_list_for_each(surface, &window->subsurface_list, link)
+		surface_redraw(surface);
+
+	window->redraw_needed = 0;
 	window_flush(window);
+
+	wl_list_for_each(surface, &window->subsurface_list, link)
+		surface_set_synchronized_default(surface);
+}
+
+static void
+window_schedule_redraw_task(struct window *window)
+{
+	if (window->configure_requests)
+		return;
+	if (!window->redraw_task_scheduled) {
+		window->redraw_task.run = idle_redraw;
+		display_defer(window->display, &window->redraw_task);
+		window->redraw_task_scheduled = 1;
+	}
 }
 
 void
 window_schedule_redraw(struct window *window)
 {
-	window->redraw_needed = 1;
-	if (window->configure_requests)
-		return;
-	if (!window->redraw_scheduled) {
-		window->redraw_task.run = idle_redraw;
-		display_defer(window->display, &window->redraw_task);
-		window->redraw_scheduled = 1;
-	}
+	struct surface *surface;
+
+	DBG_OBJ(window->main_surface->surface, "window %p\n", window);
+
+	wl_list_for_each(surface, &window->subsurface_list, link)
+		surface->redraw_needed = 1;
+
+	window_schedule_redraw_task(window);
 }
 
 int
@@ -3414,13 +3924,9 @@ window_defer_redraw_until_configure(struct window* window)
 {
 	struct wl_callback *callback;
 
-	if (window->redraw_scheduled) {
+	if (window->redraw_task_scheduled) {
 		wl_list_remove(&window->redraw_task.link);
-		window->redraw_scheduled = 0;
-	}
-	if (window->frame_cb) {
-		wl_callback_destroy(window->frame_cb);
-		window->frame_cb = 0;
+		window->redraw_task_scheduled = 0;
 	}
 
 	callback = wl_display_sync(window->display->display);
@@ -3669,7 +4175,10 @@ surface_create(struct window *window)
 
 	surface->window = window;
 	surface->surface = wl_compositor_create_surface(display->compositor);
+	surface->buffer_scale = 1;
 	wl_surface_add_listener(surface->surface, &surface_listener, window);
+
+	wl_list_insert(&window->subsurface_list, &surface->link);
 
 	return surface;
 }
@@ -3686,6 +4195,7 @@ window_create_internal(struct display *display,
 		return NULL;
 
 	memset(window, 0, sizeof *window);
+	wl_list_init(&window->subsurface_list);
 	window->display = display;
 	window->parent = parent;
 
@@ -3903,6 +4413,8 @@ window_show_menu(struct display *display,
 
 	menu->window = window;
 	menu->widget = window_add_widget(menu->window, menu);
+	window_set_buffer_scale (menu->window, window_get_buffer_scale (parent));
+	window_set_buffer_transform (menu->window, window_get_buffer_transform (parent));
 	menu->entries = entries;
 	menu->count = count;
 	menu->release_count = 0;
@@ -3936,6 +4448,42 @@ window_set_buffer_type(struct window *window, enum window_buffer_type type)
 	window->main_surface->buffer_type = type;
 }
 
+struct widget *
+window_add_subsurface(struct window *window, void *data,
+		      enum subsurface_mode default_mode)
+{
+	struct widget *widget;
+	struct surface *surface;
+	struct wl_surface *parent;
+	struct wl_subcompositor *subcompo = window->display->subcompositor;
+
+	if (!subcompo)
+		return NULL;
+
+	surface = surface_create(window);
+	widget = widget_create(window, surface, data);
+	wl_list_init(&widget->link);
+	surface->widget = widget;
+
+	parent = window->main_surface->surface;
+	surface->subsurface = wl_subcompositor_get_subsurface(subcompo,
+							      surface->surface,
+							      parent);
+	surface->synchronized = 1;
+
+	switch (default_mode) {
+	case SUBSURFACE_SYNCHRONIZED:
+		surface->synchronized_default = 1;
+		break;
+	case SUBSURFACE_DESYNCHRONIZED:
+		surface->synchronized_default = 0;
+		break;
+	default:
+		assert(!"bad enum subsurface_mode");
+	}
+
+	return widget;
+}
 
 static void
 display_handle_geometry(void *data,
@@ -3953,6 +4501,22 @@ display_handle_geometry(void *data,
 	output->allocation.x = x;
 	output->allocation.y = y;
 	output->transform = transform;
+}
+
+static void
+display_handle_done(void *data,
+		     struct wl_output *wl_output)
+{
+}
+
+static void
+display_handle_scale(void *data,
+		     struct wl_output *wl_output,
+		     int32_t scale)
+{
+	struct output *output = data;
+
+	output->scale = scale;
 }
 
 static void
@@ -3977,7 +4541,9 @@ display_handle_mode(void *data,
 
 static const struct wl_output_listener output_listener = {
 	display_handle_geometry,
-	display_handle_mode
+	display_handle_mode,
+	display_handle_done,
+	display_handle_scale
 };
 
 static void
@@ -3991,8 +4557,9 @@ display_add_output(struct display *d, uint32_t id)
 
 	memset(output, 0, sizeof *output);
 	output->display = d;
+	output->scale = 1;
 	output->output =
-		wl_registry_bind(d->registry, id, &wl_output_interface, 1);
+		wl_registry_bind(d->registry, id, &wl_output_interface, 2);
 	wl_list_insert(d->output_list.prev, &output->link);
 
 	wl_output_add_listener(output->output, &output_listener, output);
@@ -4096,6 +4663,12 @@ output_get_transform(struct output *output)
 	return output->transform;
 }
 
+uint32_t
+output_get_scale(struct output *output)
+{
+	return output->scale;
+}
+
 static void
 fini_xkb(struct input *input)
 {
@@ -4187,7 +4760,7 @@ registry_handle_global(void *data, struct wl_registry *registry, uint32_t id,
 
 	if (strcmp(interface, "wl_compositor") == 0) {
 		d->compositor = wl_registry_bind(registry, id,
-						 &wl_compositor_interface, 1);
+						 &wl_compositor_interface, 3);
 	} else if (strcmp(interface, "wl_output") == 0) {
 		display_add_output(d, id);
 	} else if (strcmp(interface, "wl_seat") == 0) {
@@ -4207,6 +4780,10 @@ registry_handle_global(void *data, struct wl_registry *registry, uint32_t id,
 					 &text_cursor_position_interface, 1);
 	} else if (strcmp(interface, "workspace_manager") == 0) {
 		init_workspace_manager(d, id);
+	} else if (strcmp(interface, "wl_subcompositor") == 0) {
+		d->subcompositor =
+			wl_registry_bind(registry, id,
+					 &wl_subcompositor_interface, 1);
 	}
 
 	if (d->global_handler)
@@ -4383,10 +4960,18 @@ handle_display_data(struct task *task, uint32_t events)
 	}
 }
 
+static void
+log_handler(const char *format, va_list args)
+{
+	vfprintf(stderr, format, args);
+}
+
 struct display *
 display_create(int *argc, char *argv[])
 {
 	struct display *d;
+
+	wl_log_set_handler_client(log_handler);
 
 	d = malloc(sizeof *d);
 	if (d == NULL)
@@ -4492,6 +5077,9 @@ display_destroy(struct display *display)
 		fini_egl(display);
 #endif
 
+	if (display->subcompositor)
+		wl_subcompositor_destroy(display->subcompositor);
+
 	if (display->shell)
 		wl_shell_destroy(display->shell);
 
@@ -4530,6 +5118,12 @@ struct wl_display *
 display_get_display(struct display *display)
 {
 	return display->display;
+}
+
+cairo_device_t *
+display_get_cairo_device(struct display *display)
+{
+	return display->argb_device;
 }
 
 struct output *

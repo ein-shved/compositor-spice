@@ -20,6 +20,8 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "config.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -39,6 +41,9 @@ weston_spring_init(struct weston_spring *spring,
 	spring->current = current;
 	spring->previous = current;
 	spring->target = target;
+	spring->clip = WESTON_SPRING_OVERSHOOT;
+	spring->min = 0.0;
+	spring->max = 1.0;
 }
 
 WL_EXPORT void
@@ -69,22 +74,35 @@ weston_spring_update(struct weston_spring *spring, uint32_t msec)
 			force * step * step;
 		spring->previous = current;
 
-#if 0
-		if (spring->current >= 1.0) {
-#ifdef TWEENER_BOUNCE
-			spring->current = 2.0 - spring->current;
-			spring->previous = 2.0 - spring->previous;
-#else
-			spring->current = 1.0;
-			spring->previous = 1.0;
-#endif
+		switch (spring->clip) {
+		case WESTON_SPRING_OVERSHOOT:
+			break;
+
+		case WESTON_SPRING_CLAMP:
+			if (spring->current > spring->max) {
+				spring->current = spring->max;
+				spring->previous = spring->max;
+			} else if (spring->current < 0.0) {
+				spring->current = spring->min;
+				spring->previous = spring->min;
+			}
+			break;
+
+		case WESTON_SPRING_BOUNCE:
+			if (spring->current > spring->max) {
+				spring->current =
+					2 * spring->max - spring->current;
+				spring->previous =
+					2 * spring->max - spring->previous;
+			} else if (spring->current < spring->min) {
+				spring->current =
+					2 * spring->min - spring->current;
+				spring->previous =
+					2 * spring->min - spring->previous;
+			}
+			break;
 		}
 
-		if (spring->current <= 0.0) {
-			spring->current = 0.0;
-			spring->previous = 0.0;
-		}
-#endif
 		spring->timestamp += 4;
 	}
 }
@@ -92,8 +110,8 @@ weston_spring_update(struct weston_spring *spring, uint32_t msec)
 WL_EXPORT int
 weston_spring_done(struct weston_spring *spring)
 {
-	return fabs(spring->previous - spring->target) < 0.0002 &&
-		fabs(spring->current - spring->target) < 0.0002;
+	return fabs(spring->previous - spring->target) < 0.002 &&
+		fabs(spring->current - spring->target) < 0.002;
 }
 
 typedef	void (*weston_surface_animation_frame_func_t)(struct weston_surface_animation *animation);
@@ -186,8 +204,7 @@ weston_surface_animation_run(struct weston_surface *surface,
 	weston_surface_animation_frame(&animation->animation, NULL, 0);
 
 	animation->listener.notify = handle_animation_surface_destroy;
-	wl_signal_add(&surface->surface.resource.destroy_signal,
-		      &animation->listener);
+	wl_signal_add(&surface->destroy_signal, &animation->listener);
 
 	wl_list_insert(&surface->output->animation_list,
 		       &animation->animation.link);
@@ -222,8 +239,16 @@ WL_EXPORT struct weston_surface_animation *
 weston_zoom_run(struct weston_surface *surface, float start, float stop,
 		weston_surface_animation_done_func_t done, void *data)
 {
-	return weston_surface_animation_run(surface, start, stop,
+	struct weston_surface_animation *zoom;
+
+	zoom = weston_surface_animation_run(surface, start, stop,
 					    zoom_frame, done, data);
+
+	weston_spring_init(&zoom->spring, 300.0, start, stop);
+	zoom->spring.friction = 1400;
+	zoom->spring.previous = start - (stop - start) * 0.03;
+
+	return zoom;
 }
 
 static void
@@ -248,16 +273,19 @@ weston_fade_run(struct weston_surface *surface,
 					    fade_frame, done, data);
 
 	weston_spring_init(&fade->spring, k, start, end);
+
+	fade->spring.friction = 1400;
+	fade->spring.previous = -(end - start) * 0.03;
+
 	surface->alpha = start;
 
 	return fade;
 }
 
 WL_EXPORT void
-weston_fade_update(struct weston_surface_animation *fade,
-		   float start, float end, float k)
+weston_fade_update(struct weston_surface_animation *fade, float target)
 {
-	weston_spring_init(&fade->spring, k, start, end);
+	fade->spring.target = target;
 }
 
 static void
@@ -283,8 +311,9 @@ weston_slide_run(struct weston_surface *surface, float start, float stop,
 	if (!animation)
 		return NULL;
 
-	animation->spring.friction = 900;
-	animation->spring.k = 300;
+	animation->spring.friction = 600;
+	animation->spring.k = 400;
+	animation->spring.clip = WESTON_SPRING_BOUNCE;
 
 	return animation;
 }

@@ -24,7 +24,10 @@ server is started:
 .nf
 .BR "$XDG_CONFIG_HOME/weston.ini   " "(if $XDG_CONFIG_HOME is set)"
 .BR "$HOME/.config/weston.ini      " "(if $HOME is set)"
-.BR "<current dir>/weston.ini      " "(if both variables were not set)"
+.B  "weston/weston.ini in each"
+.BR "\ \ \ \ $XDG_CONFIG_DIR           " "(if $XDG_CONFIG_DIRS is set)"
+.BR "/etc/xdg/weston/weston.ini    " "(if $XDG_CONFIG_DIRS is not set)"
+.BR "<current dir>/weston.ini      " "(if no variables were set)"
 .fi
 .RE
 .PP
@@ -32,7 +35,12 @@ where environment variable
 .B $HOME
 is the user's home directory, and
 .B $XDG_CONFIG_HOME
-is the user specific configuration directory.
+is the user specific configuration directory, and
+.B $XDG_CONFIG_DIRS
+is a colon
+.B ':'
+delimited listed of configuration base directories, such as
+.BR /etc/xdg-foo:/etc/xdg .
 .PP
 The
 .I weston.ini
@@ -108,6 +116,15 @@ The entries that can appear in this section are:
 .TP 7
 .BI "background-image=" file
 sets the path for the background image file (string).
+.TP 7
+.BI "background-type=" tile
+determines how the background image is drawn (string). Can be
+.BR scale ", " scale-crop " or " tile " (default)."
+Scale means scaled to fit the output precisely, not preserving aspect ratio.
+Scale-crop preserves aspect ratio, scales the background image just big
+enough to cover the output, and centers it. The image ends up cropped from
+left and right, or top and bottom, if the aspect ratio does not match the
+output. Tile repeats the background image to fill the output.
 .TP 7
 .BI "background-color=" 0xAARRGGBB
 sets the color of the background (unsigned integer). The hexadecimal
@@ -270,6 +287,15 @@ be one of the following 8 strings:
 .BR  "flipped-180   " "Flipped upside down"
 .BR  "flipped-270   " "Flipped and 90 degrees counter clockwise"
 .fi
+.RE
+.TP 7
+.BI "seat=" name
+The logical seat name that that this output should be associated with. If this
+is set then the seat's input will be confined to the output that has the seat
+set on it. The expectation is that this functionality will be used in a
+multiheaded environment with a single compositor for multiple output and input
+configurations. The default seat is called "default" and will always be
+present. This seat can be constrained like any other.
 .RE
 .SH "INPUT-METHOD SECTION"
 .TP 7

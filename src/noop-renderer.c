@@ -20,7 +20,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
+#include "config.h"
 
 #include <stdlib.h>
 
@@ -47,7 +47,7 @@ noop_renderer_flush_damage(struct weston_surface *surface)
 }
 
 static void
-noop_renderer_attach(struct weston_surface *es, struct wl_buffer *buffer)
+noop_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 {
 }
 

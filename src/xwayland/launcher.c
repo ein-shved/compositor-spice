@@ -20,7 +20,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -72,7 +72,7 @@ weston_xserver_handle_event(int listen_fd, uint32_t mask, void *data)
 			  "-terminate",
 			  NULL) < 0)
 			weston_log("exec failed: %m\n");
-		exit(-1);
+		_exit(EXIT_FAILURE);
 
 	default:
 		weston_log("forked X server, pid %d\n", wxs->process.pid);
@@ -159,8 +159,10 @@ bind_xserver(struct wl_client *client,
 		return;
 
 	wxs->resource = 
-		wl_client_add_object(client, &xserver_interface,
-				     &xserver_implementation, id, wxs);
+		wl_resource_create(client, &xserver_interface,
+					       1, id);
+	wl_resource_set_implementation(wxs->resource, &xserver_implementation,
+				       wxs, NULL);
 
 	wxs->wm = weston_wm_create(wxs);
 	if (wxs->wm == NULL) {
@@ -316,7 +318,7 @@ weston_xserver_destroy(struct wl_listener *l, void *data)
 
 WL_EXPORT int
 module_init(struct weston_compositor *compositor,
-	    int *argc, char *argv[], const char *config_file)
+	    int *argc, char *argv[])
 
 {
 	struct wl_display *display = compositor->wl_display;
@@ -374,7 +376,7 @@ module_init(struct weston_compositor *compositor,
 				     WL_EVENT_READABLE,
 				     weston_xserver_handle_event, wxs);
 
-	wl_display_add_global(display, &xserver_interface, wxs, bind_xserver);
+	wl_global_create(display, &xserver_interface, 1, wxs, bind_xserver);
 
 	wxs->destroy_listener.notify = weston_xserver_destroy;
 	wl_signal_add(&compositor->destroy_signal, &wxs->destroy_listener);

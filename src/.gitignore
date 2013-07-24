@@ -4,6 +4,7 @@ weston
 weston-launch
 screenshooter-protocol.c
 screenshooter-server-protocol.h
+spring-tool
 text-cursor-position-protocol.c
 text-cursor-position-server-protocol.h
 tablet-shell-protocol.c
@@ -18,3 +19,6 @@ workspaces-protocol.c
 workspaces-server-protocol.h
 input-method-protocol.c
 input-method-server-protocol.h
+subsurface-server-protocol.h
+subsurface-protocol.c
+

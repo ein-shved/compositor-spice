@@ -63,8 +63,11 @@ clients_programs =				\
 	eventdemo				\
 	clickdot				\
 	transformed				\
+	fullscreen				\
 	calibrator				\
-	$(full_gl_client_programs)
+	$(subsurfaces)				\
+	$(full_gl_client_programs)		\
+	$(cairo_glesv2_programs)
 
 desktop_shell = weston-desktop-shell
 
@@ -81,6 +84,8 @@ libtoytoolkit_la_SOURCES =			\
 	window.h				\
 	text-cursor-position-protocol.c		\
 	text-cursor-position-client-protocol.h	\
+	subsurface-protocol.c			\
+	subsurface-client-protocol.h		\
 	workspaces-protocol.c			\
 	workspaces-client-protocol.h
 
@@ -117,6 +122,16 @@ smoke_LDADD = libtoytoolkit.la
 resizor_SOURCES = resizor.c
 resizor_LDADD = libtoytoolkit.la
 
+if HAVE_CAIRO_GLESV2
+cairo_glesv2_programs = nested nested-client
+
+nested_SOURCES = nested.c
+nested_LDADD = libtoytoolkit.la $(SERVER_LIBS)
+
+nested_client_SOURCES = nested-client.c
+nested_client_LDADD = $(SIMPLE_EGL_CLIENT_LIBS) -lm
+endif
+
 eventdemo_SOURCES = eventdemo.c
 eventdemo_LDADD = libtoytoolkit.la
 
@@ -126,8 +141,18 @@ clickdot_LDADD = libtoytoolkit.la
 transformed_SOURCES = transformed.c
 transformed_LDADD = libtoytoolkit.la
 
+fullscreen_SOURCES = fullscreen.c
+fullscreen_LDADD = libtoytoolkit.la
+
 calibrator_SOURCES = calibrator.c ../shared/matrix.c ../shared/matrix.h
 calibrator_LDADD = libtoytoolkit.la
+
+if BUILD_SUBSURFACES_CLIENT
+subsurfaces = subsurfaces
+subsurfaces_SOURCES = subsurfaces.c
+subsurfaces_CPPFLAGS = $(AM_CPPFLAGS) $(SIMPLE_EGL_CLIENT_CFLAGS)
+subsurfaces_LDADD = libtoytoolkit.la $(SIMPLE_EGL_CLIENT_LIBS) -lm
+endif
 
 if HAVE_PANGO
 pango_programs = editor
@@ -185,6 +210,8 @@ BUILT_SOURCES =					\
 	desktop-shell-protocol.c		\
 	tablet-shell-client-protocol.h		\
 	tablet-shell-protocol.c			\
+	subsurface-client-protocol.h		\
+	subsurface-protocol.c			\
 	workspaces-client-protocol.h		\
 	workspaces-protocol.c
 

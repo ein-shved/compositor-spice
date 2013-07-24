@@ -42,66 +42,13 @@ struct transformed {
 };
 
 static void
-update_transform(cairo_t *cr, enum wl_output_transform transform)
+draw_stuff(cairo_t *cr, int width, int height)
 {
-	double angle;
-
 	cairo_matrix_t m;
+	cairo_get_matrix (cr, &m);
 
-	switch(transform) {
-	case WL_OUTPUT_TRANSFORM_FLIPPED:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		cairo_matrix_init(&m, -1, 0, 0, 1, 0, 0);
-		break;
-	default:
-		cairo_matrix_init_identity(&m);
-		break;
-	}
-	switch (transform) {
-	case WL_OUTPUT_TRANSFORM_NORMAL:
-	case WL_OUTPUT_TRANSFORM_FLIPPED:
-	default:
-		angle = 0;
-		break;
-	case WL_OUTPUT_TRANSFORM_90:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
-		angle = M_PI_2;
-		break;
-	case WL_OUTPUT_TRANSFORM_180:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
-		angle = M_PI;
-		break;
-	case WL_OUTPUT_TRANSFORM_270:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		angle = M_PI + M_PI_2;
-		break;
-	}
-
-	cairo_rotate(cr, angle);
-	cairo_transform(cr, &m);
-}
-
-static void
-draw_stuff(cairo_surface_t *surface, int width, int height, int transform)
-{
-	cairo_t *cr;
-	int tmp;
-
-	if (transform & 1) {
-		tmp = width;
-		width = height;
-		height = tmp;
-	}
-
-	cr = cairo_create(surface);
-
-	cairo_identity_matrix(cr);
 	cairo_translate(cr, width / 2, height / 2);
 	cairo_scale(cr, width / 2, height / 2);
-
-	update_transform(cr, transform);
 
 	cairo_set_source_rgba(cr, 0, 0, 0.3, 1.0);
 	cairo_set_source_rgba(cr, 0, 0, 0, 1.0);
@@ -113,7 +60,7 @@ draw_stuff(cairo_surface_t *surface, int width, int height, int transform)
 	cairo_line_to(cr, 0, -1);
 
 	cairo_save(cr);
-	cairo_identity_matrix(cr);
+	cairo_set_matrix(cr, &m);
 	cairo_set_line_width(cr, 2.0);
 	cairo_stroke(cr);
 	cairo_restore(cr);
@@ -123,7 +70,7 @@ draw_stuff(cairo_surface_t *surface, int width, int height, int transform)
 	cairo_line_to(cr, 1, 0);
 
 	cairo_save(cr);
-	cairo_identity_matrix(cr);
+	cairo_set_matrix(cr, &m);
 	cairo_set_line_width(cr, 2.0);
 	cairo_stroke(cr);
 	cairo_restore(cr);
@@ -135,7 +82,7 @@ draw_stuff(cairo_surface_t *surface, int width, int height, int transform)
 	cairo_line_to(cr, -1, 0);
 
 	cairo_save(cr);
-	cairo_identity_matrix(cr);
+	cairo_set_matrix(cr, &m);
 	cairo_set_line_width(cr, 2.0);
 	cairo_stroke(cr);
 	cairo_restore(cr);
@@ -168,7 +115,7 @@ redraw_handler(struct widget *widget, void *data)
 	struct transformed *transformed = data;
 	struct rectangle allocation;
 	cairo_surface_t *surface;
-	int transform;
+	cairo_t *cr;
 
 	surface = window_get_surface(transformed->window);
 	if (surface == NULL ||
@@ -178,9 +125,9 @@ redraw_handler(struct widget *widget, void *data)
 	}
 
 	widget_get_allocation(transformed->widget, &allocation);
-	transform = window_get_buffer_transform(transformed->window);
 
-	draw_stuff(surface, allocation.width, allocation.height, transform);
+	cr = widget_cairo_create(widget);
+	draw_stuff(cr, allocation.width, allocation.height);
 
 	cairo_surface_destroy(surface);
 }
@@ -193,6 +140,60 @@ output_handler(struct window *window, struct output *output, int enter,
 		return;
 
 	window_set_buffer_transform(window, output_get_transform(output));
+	window_set_buffer_scale(window, output_get_scale(output));
+	window_schedule_redraw(window);
+}
+
+static void
+key_handler(struct window *window, struct input *input, uint32_t time,
+	    uint32_t key, uint32_t sym, enum wl_keyboard_key_state state,
+	    void *data)
+{
+	int transform, scale;
+
+	if (state == WL_KEYBOARD_KEY_STATE_RELEASED)
+		return;
+
+	transform = window_get_buffer_transform (window);
+	scale = window_get_buffer_scale (window);
+	switch (sym) {
+	case XKB_KEY_Left:
+		if (transform == 0)
+			transform = 3;
+		else if (transform == 4)
+			transform = 7;
+		else
+			transform--;
+		break;
+
+	case XKB_KEY_Right:
+		if (transform == 3)
+			transform = 0;
+		else if (transform == 7)
+			transform = 4;
+		else
+			transform++;
+		break;
+
+	case XKB_KEY_space:
+		if (transform >= 4)
+			transform -= 4;
+		else
+			transform += 4;
+		break;
+
+	case XKB_KEY_z:
+		if (scale == 1)
+			scale = 2;
+		else
+			scale = 1;
+		break;
+	}
+
+	printf ("setting buffer transform to %d\n", transform);
+	printf ("setting buffer scale to %d\n", scale);
+	window_set_buffer_transform(window, transform);
+	window_set_buffer_scale(window, scale);
 	window_schedule_redraw(window);
 }
 
@@ -286,6 +287,7 @@ int main(int argc, char *argv[])
 	widget_set_redraw_handler(transformed.widget, redraw_handler);
 	widget_set_button_handler(transformed.widget, button_handler);
 
+	window_set_key_handler(transformed.window, key_handler);
 	window_set_fullscreen_handler(transformed.window, fullscreen_handler);
 	window_set_output_handler(transformed.window, output_handler);
 

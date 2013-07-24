@@ -20,13 +20,14 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "config.h"
+
 #include <stdlib.h>
 
 #include "compositor.h"
 #include "text-cursor-position-server-protocol.h"
 
 struct text_cursor_position {
-	struct wl_object base;
 	struct weston_compositor *ec;
 	struct wl_global *global;
 	struct wl_listener destroy_listener;
@@ -38,7 +39,10 @@ text_cursor_position_notify(struct wl_client *client,
 			    struct wl_resource *surface_resource,
 			    wl_fixed_t x, wl_fixed_t y)
 {
-	weston_text_cursor_position_notify((struct weston_surface *) surface_resource, x, y);
+	struct weston_surface *surface =
+		wl_resource_get_user_data(surface_resource);
+
+	weston_text_cursor_position_notify(surface, x, y);
 }
 
 struct text_cursor_position_interface text_cursor_position_implementation = {
@@ -49,8 +53,14 @@ static void
 bind_text_cursor_position(struct wl_client *client,
 	     void *data, uint32_t version, uint32_t id)
 {
-	wl_client_add_object(client, &text_cursor_position_interface,
-			     &text_cursor_position_implementation, id, data);
+	struct wl_resource *resource;
+
+	resource = wl_resource_create(client,
+				      &text_cursor_position_interface, 1, id);
+	if (resource)
+		wl_resource_set_implementation(resource,
+					       &text_cursor_position_implementation,
+					       data, NULL);
 }
 
 static void
@@ -59,7 +69,7 @@ text_cursor_position_notifier_destroy(struct wl_listener *listener, void *data)
 	struct text_cursor_position *text_cursor_position =
 		container_of(listener, struct text_cursor_position, destroy_listener);
 
-	wl_display_remove_global(text_cursor_position->ec->wl_display, text_cursor_position->global);
+	wl_global_destroy(text_cursor_position->global);
 	free(text_cursor_position);
 }
 
@@ -72,16 +82,16 @@ text_cursor_position_notifier_create(struct weston_compositor *ec)
 	if (text_cursor_position == NULL)
 		return;
 
-	text_cursor_position->base.interface = &text_cursor_position_interface;
-	text_cursor_position->base.implementation =
-		(void(**)(void)) &text_cursor_position_implementation;
 	text_cursor_position->ec = ec;
 
-	text_cursor_position->global = wl_display_add_global(ec->wl_display,
-						&text_cursor_position_interface,
-						text_cursor_position, bind_text_cursor_position);
+	text_cursor_position->global =
+		wl_global_create(ec->wl_display,
+				 &text_cursor_position_interface, 1,
+				 text_cursor_position,
+				 bind_text_cursor_position);
 
-	text_cursor_position->destroy_listener.notify = text_cursor_position_notifier_destroy;
+	text_cursor_position->destroy_listener.notify =
+		text_cursor_position_notifier_destroy;
 	wl_signal_add(&ec->destroy_signal, &text_cursor_position->destroy_listener);
 }
 
@@ -168,10 +178,10 @@ weston_zoom_frame_xy(struct weston_animation *animation,
 		output->zoom.spring_xy.current = output->zoom.spring_xy.target;
 		output->zoom.current.x =
 			output->zoom.type == ZOOM_FOCUS_POINTER ?
-				seat->pointer.x : output->zoom.text_cursor.x;
+				seat->pointer->x : output->zoom.text_cursor.x;
 		output->zoom.current.y =
 			output->zoom.type == ZOOM_FOCUS_POINTER ?
-				seat->pointer.y : output->zoom.text_cursor.y;
+				seat->pointer->y : output->zoom.text_cursor.y;
 		wl_list_remove(&animation->link);
 		wl_list_init(&animation->link);
 	}
@@ -337,15 +347,15 @@ WL_EXPORT void
 weston_output_update_zoom(struct weston_output *output, uint32_t type)
 {
 	struct weston_seat *seat = weston_zoom_pick_seat(output->compositor);
-	wl_fixed_t x = seat->pointer.x;
-	wl_fixed_t y = seat->pointer.y;
+	wl_fixed_t x = seat->pointer->x;
+	wl_fixed_t y = seat->pointer->y;
 
 	zoom_area_center_from_pointer(output, &x, &y);
 
 	if (type == ZOOM_FOCUS_POINTER) {
 		if (wl_list_empty(&output->zoom.animation_xy.link)) {
-			output->zoom.current.x = seat->pointer.x;
-			output->zoom.current.y = seat->pointer.y;
+			output->zoom.current.x = seat->pointer->x;
+			output->zoom.current.y = seat->pointer->y;
 		} else {
 			output->zoom.to.x = x;
 			output->zoom.to.y = y;

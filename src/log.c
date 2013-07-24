@@ -20,6 +20,8 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "config.h"
+
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -45,17 +47,14 @@ static int weston_log_timestamp(void)
 	gettimeofday(&tv, NULL);
 
 	brokendown_time = localtime(&tv.tv_sec);
-
-	strftime(string, sizeof string, "%H:%M:%S", brokendown_time);
-
 	if (brokendown_time->tm_mday != cached_tm_mday) {
-		char date_string[128];
-
-		strftime(date_string, sizeof string, "%Y-%m-%d %Z", brokendown_time);
-		fprintf(weston_logfile, "Date: %s\n", date_string);
+		strftime(string, sizeof string, "%Y-%m-%d %Z", brokendown_time);
+		fprintf(weston_logfile, "Date: %s\n", string);
 
 		cached_tm_mday = brokendown_time->tm_mday;
 	}
+
+	strftime(string, sizeof string, "%H:%M:%S", brokendown_time);
 
 	return fprintf(weston_logfile, "[%s.%03li] ", string, tv.tv_usec/1000);
 }
@@ -91,15 +90,33 @@ weston_log_file_close()
 }
 
 WL_EXPORT int
+weston_vlog(const char *fmt, va_list ap)
+{
+	int l;
+
+	l = weston_log_timestamp();
+	l += vfprintf(weston_logfile, fmt, ap);
+
+	return l;
+}
+
+WL_EXPORT int
 weston_log(const char *fmt, ...)
 {
 	int l;
 	va_list argp;
+
 	va_start(argp, fmt);
-	l = weston_log_timestamp();
-	l += vfprintf(weston_logfile, fmt, argp);
+	l = weston_vlog(fmt, argp);
 	va_end(argp);
+
 	return l;
+}
+
+WL_EXPORT int
+weston_vlog_continue(const char *fmt, va_list argp)
+{
+	return vfprintf(weston_logfile, fmt, argp);
 }
 
 WL_EXPORT int
@@ -107,8 +124,10 @@ weston_log_continue(const char *fmt, ...)
 {
 	int l;
 	va_list argp;
+
 	va_start(argp, fmt);
-	l = vfprintf(weston_logfile, fmt, argp);
+	l = weston_vlog_continue(fmt, argp);
 	va_end(argp);
+
 	return l;
 }

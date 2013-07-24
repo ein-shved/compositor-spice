@@ -21,9 +21,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "config.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -112,7 +110,7 @@ headless_compositor_create_output(struct headless_compositor *c,
 
 	output->base.current = &output->mode;
 	weston_output_init(&output->base, &c->base, 0, 0, width, height,
-			   WL_OUTPUT_TRANSFORM_NORMAL);
+			   WL_OUTPUT_TRANSFORM_NORMAL, 1);
 
 	output->base.make = "weston";
 	output->base.model = "headless";
@@ -157,8 +155,9 @@ headless_destroy(struct weston_compositor *ec)
 
 static struct weston_compositor *
 headless_compositor_create(struct wl_display *display,
-			  int width, int height, const char *display_name,
-			  int *argc, char *argv[], const char *config_file)
+			   int width, int height, const char *display_name,
+			   int *argc, char *argv[],
+			   struct weston_config *config)
 {
 	struct headless_compositor *c;
 
@@ -168,11 +167,10 @@ headless_compositor_create(struct wl_display *display,
 
 	memset(c, 0, sizeof *c);
 
-	if (weston_compositor_init(&c->base, display, argc, argv,
-				   config_file) < 0)
+	if (weston_compositor_init(&c->base, display, argc, argv, config) < 0)
 		goto err_free;
 
-	weston_seat_init(&c->fake_seat, &c->base);
+	weston_seat_init(&c->fake_seat, &c->base, "default");
 
 	c->base.destroy = headless_destroy;
 	c->base.restore = headless_restore;
@@ -194,7 +192,7 @@ err_free:
 
 WL_EXPORT struct weston_compositor *
 backend_init(struct wl_display *display, int *argc, char *argv[],
-	     const char *config_file)
+	     struct weston_config *config)
 {
 	int width = 1024, height = 640;
 	char *display_name = NULL;
@@ -208,5 +206,5 @@ backend_init(struct wl_display *display, int *argc, char *argv[],
 		      ARRAY_LENGTH(headless_options), argc, argv);
 
 	return headless_compositor_create(display, width, height, display_name,
-					 argc, argv, config_file);
+					  argc, argv, config);
 }

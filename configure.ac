@@ -1,5 +1,5 @@
 m4_define([weston_major_version], [1])
-m4_define([weston_minor_version], [1])
+m4_define([weston_minor_version], [2])
 m4_define([weston_micro_version], [0])
 m4_define([weston_version],
           [weston_major_version.weston_minor_version.weston_micro_version])
@@ -17,6 +17,8 @@ AC_SUBST([WESTON_VERSION_MICRO], [weston_micro_version])
 AC_SUBST([WESTON_VERSION], [weston_version])
 
 AC_CONFIG_HEADERS([config.h])
+
+AC_USE_SYSTEM_EXTENSIONS
 
 AM_INIT_AUTOMAKE([1.11 parallel-tests foreign no-dist-gzip dist-xz color-tests])
 
@@ -39,11 +41,20 @@ AC_CHECK_FUNC([dlopen], [],
               AC_CHECK_LIB([dl], [dlopen], DLOPEN_LIBS="-ldl"))
 AC_SUBST(DLOPEN_LIBS)
 
+AC_CHECK_DECL(SFD_CLOEXEC,[],
+	      [AC_MSG_ERROR("SFD_CLOEXEC is needed to compile weston")],
+	      [[#include <sys/signalfd.h>]])
+AC_CHECK_DECL(TFD_CLOEXEC,[],
+	      [AC_MSG_ERROR("TFD_CLOEXEC is needed to compile weston")],
+	      [[#include <sys/timerfd.h>]])
+AC_CHECK_DECL(CLOCK_MONOTONIC,[],
+	      [AC_MSG_ERROR("CLOCK_MONOTONIC is needed to compile weston")],
+	      [[#include <time.h>]])
 AC_CHECK_HEADERS([execinfo.h])
 
-AC_CHECK_FUNCS([mkostemp strchrnul])
+AC_CHECK_FUNCS([mkostemp strchrnul initgroups])
 
-COMPOSITOR_MODULES="wayland-server xkbcommon pixman-1"
+COMPOSITOR_MODULES="wayland-server >= 1.1.90 pixman-1"
 
 AC_ARG_ENABLE(egl, [  --disable-egl],,
               enable_egl=yes)
@@ -51,6 +62,19 @@ AM_CONDITIONAL(ENABLE_EGL, test x$enable_egl = xyes)
 if test x$enable_egl = xyes; then
 	AC_DEFINE([ENABLE_EGL], [1], [Build Weston with EGL support])
 	COMPOSITOR_MODULES="$COMPOSITOR_MODULES egl >= 7.10 glesv2"
+fi
+
+AC_ARG_ENABLE(xkbcommon,
+	      AS_HELP_STRING([--disable-xkbcommon], [Disable libxkbcommon
+			      support: This is only useful in environments
+			      where you do not have a hardware keyboard. If
+			      libxkbcommon support is disabled clients will not
+			      be sent a keymap and and must know how to
+			      interpret the keycode sent for any key event.]),,
+	      enable_xkbcommon=yes)
+if test x$enable_xkbcommon = xyes; then
+	AC_DEFINE(ENABLE_XKBCOMMON, [1], [Build Weston with libxkbcommon support])
+	COMPOSITOR_MODULES="$COMPOSITOR_MODULES xkbcommon"
 fi
 
 PKG_CHECK_MODULES(COMPOSITOR, [$COMPOSITOR_MODULES])
@@ -146,9 +170,9 @@ AC_ARG_ENABLE(rpi-compositor,
 	      AS_HELP_STRING([--disable-rpi-compositor],
 	                     [do not build the Raspberry Pi backend]),,
 	      enable_rpi_compositor=yes)
-AM_CONDITIONAL(ENABLE_RPI_COMPOSITOR, test "x$enable_rpi_compositor" = "xyes" -a "x$enable_egl" = "xyes")
+AM_CONDITIONAL(ENABLE_RPI_COMPOSITOR, test "x$enable_rpi_compositor" = "xyes")
 have_bcm_host="no"
-if test x$enable_rpi_compositor = xyes -a x$enable_egl = xyes; then
+if test "x$enable_rpi_compositor" = "xyes"; then
   AC_DEFINE([BUILD_RPI_COMPOSITOR], [1], [Build the compositor for Raspberry Pi])
   PKG_CHECK_MODULES(RPI_COMPOSITOR, [libudev >= 136 mtdev >= 1.1.0])
   PKG_CHECK_MODULES(RPI_BCM_HOST, [bcm_host],
@@ -173,6 +197,7 @@ AC_ARG_ENABLE([rdp-compositor], [  --enable-rdp-compositor],,
 AM_CONDITIONAL([ENABLE_RDP_COMPOSITOR],
                [test x$enable_rdp_compositor = xyes])
 if test x$enable_rdp_compositor = xyes; then
+  AC_DEFINE([BUILD_RDP_COMPOSITOR], [1], [Build the RDP compositor])
   PKG_CHECK_MODULES(RDP_COMPOSITOR, [freerdp >= 1.1.0])
 fi
 
@@ -252,6 +277,7 @@ if test x$enable_clients = xyes; then
   AC_DEFINE([BUILD_CLIENTS], [1], [Build the Wayland clients])
 
   PKG_CHECK_MODULES(CLIENT, [wayland-client cairo >= 1.10.0 xkbcommon wayland-cursor])
+  PKG_CHECK_MODULES(SERVER, [wayland-server])
   PKG_CHECK_MODULES(WESTON_INFO, [wayland-client])
 
   PKG_CHECK_MODULES(POPPLER, [poppler-glib glib-2.0 gobject-2.0 gio-2.0 ],
@@ -263,6 +289,13 @@ if test x$enable_clients = xyes; then
         [AC_MSG_WARN([clients will use cairo image, cairo-egl not used because $CAIRO_EGL_PKG_ERRORS])])
   PKG_CHECK_MODULES(PANGO, [pangocairo], [have_pango=yes], [have_pango=no])
 fi
+
+AC_ARG_ENABLE(resize-optimization,
+              AS_HELP_STRING([--disable-resize-optimization],
+                             [disable resize optimization allocating a big buffer in toytoolkit]),,
+              enable_resize_optimization=yes)
+AS_IF([test "x$enable_resize_optimization" = "xyes"],
+      [AC_DEFINE([USE_RESIZE_POOL], [1], [Use resize memory pool as a performance optimization])])
 
 AC_ARG_ENABLE(weston-launch, [  --enable-weston-launch],, enable_weston_launch=yes)
 AM_CONDITIONAL(BUILD_WESTON_LAUNCH, test x$enable_weston_launch == xyes)
@@ -290,8 +323,14 @@ AM_CONDITIONAL(HAVE_POPPLER, test "x$have_poppler" = "xyes")
 
 AM_CONDITIONAL(HAVE_PANGO, test "x$have_pango" = "xyes")
 
+AM_CONDITIONAL(HAVE_CAIRO_GLESV2,
+	       [test "x$have_cairo_egl" = "xyes" -a "x$cairo_modules" = "xcairo-glesv2" -a "x$enable_egl" = "xyes"])
+
 AM_CONDITIONAL(BUILD_FULL_GL_CLIENTS,
 	       test x$cairo_modules = "xcairo-gl" -a "x$have_cairo_egl" = "xyes" -a "x$enable_egl" = "xyes")
+
+AM_CONDITIONAL(BUILD_SUBSURFACES_CLIENT,
+	       [test '(' "x$have_cairo_egl" != "xyes" -o "x$cairo_modules" = "xcairo-glesv2" ')' -a "x$enable_simple_egl_clients" = "xyes"])
 
 AM_CONDITIONAL(ENABLE_DESKTOP_SHELL, true)
 
@@ -302,6 +341,24 @@ AC_ARG_ENABLE(tablet-shell,
 AM_CONDITIONAL(ENABLE_TABLET_SHELL,
 	       test "x$enable_tablet_shell" = "xyes")
 
+# CMS modules
+AC_ARG_ENABLE(colord,
+              AS_HELP_STRING([--disable-colord],
+                             [do not build colord CMS support]),,
+	      enable_colord=auto)
+if test "x$enable_colord" != "xno"; then
+	PKG_CHECK_MODULES(COLORD,
+			  colord >= 0.1.27,
+			  have_colord=yes,
+			  have_colord=no)
+	if test "x$have_colord" = "xno" -a "x$enable_colord" = "xyes"; then
+	  AC_MSG_ERROR([colord support explicitly requested, but colord couldn't be found])
+	fi
+	if test "x$have_colord" = "xyes"; then
+	     enable_colord=yes
+	fi
+fi
+AM_CONDITIONAL(ENABLE_COLORD, test "x$enable_colord" = "xyes")
 
 AC_ARG_ENABLE(wcap-tools, [  --disable-wcap-tools],, enable_wcap_tools=yes)
 AM_CONDITIONAL(BUILD_WCAP_TOOLS, test x$enable_wcap_tools = xyes)
@@ -324,14 +381,25 @@ if test "x$GCC" = "xyes"; then
 fi
 AC_SUBST(GCC_CFLAGS)
 
-AC_ARG_ENABLE(libunwind, AS_HELP_STRING([  --disable-libunwind],
-                                        [Disable libunwind usage for backtraces]),,
-              enable_libunwind=yes)
-if test "x$enable_libunwind" = xyes; then
-    PKG_CHECK_MODULES(LIBUNWIND, libunwind)
-    AC_DEFINE(HAVE_LIBUNWIND, 1, [Have libunwind support])
-fi
+AC_ARG_ENABLE(libunwind,
+              AS_HELP_STRING([--disable-libunwind],
+                             [Disable libunwind usage for backtraces]),,
+              enable_libunwind=auto)
 AM_CONDITIONAL(HAVE_LIBUNWIND, [test "x$enable_libunwind" = xyes])
+if test "x$enable_libunwind" != "xno"; then
+        PKG_CHECK_MODULES(LIBUNWIND,
+                          libunwind,
+                          have_libunwind=yes,
+                          have_libunwind=no)
+        if test "x$have_libunwind" = "xno" -a "x$enable_libunwind" = "xyes"; then
+          AC_MSG_ERROR([libunwind support explicitly requested, but libunwind couldn't be found])
+        fi
+        if test "x$have_libunwind" = "xyes"; then
+             enable_libunwind=yes
+             AC_DEFINE(HAVE_LIBUNWIND, 1, [Have libunwind support])
+        fi
+fi
+
 
 if test "x$WESTON_NATIVE_BACKEND" = "x"; then
 	WESTON_NATIVE_BACKEND="drm-backend.so"
@@ -339,6 +407,13 @@ fi
 AC_MSG_NOTICE([Weston's native backend: $WESTON_NATIVE_BACKEND])
 AC_DEFINE_UNQUOTED([WESTON_NATIVE_BACKEND], ["$WESTON_NATIVE_BACKEND"],
 		   [The default backend to load, if not wayland nor x11.])
+
+PKG_CHECK_MODULES(LCMS, lcms2,
+                  [have_lcms=yes], [have_lcms=no])
+if test "x$have_lcms" = xyes; then
+       AC_DEFINE(HAVE_LCMS, 1, [Have lcms support])
+fi
+AM_CONDITIONAL(HAVE_LCMS, [test "x$have_lcms" = xyes])
 
 WAYLAND_SCANNER_RULES(['$(top_srcdir)/protocol'])
 

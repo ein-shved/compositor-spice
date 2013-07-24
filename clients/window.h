@@ -27,6 +27,7 @@
 #include <wayland-client.h>
 #include <cairo.h>
 #include "../shared/config-parser.h"
+#include "subsurface-client-protocol.h"
 
 #define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
 
@@ -66,6 +67,9 @@ display_get_user_data(struct display *display);
 
 struct wl_display *
 display_get_display(struct display *display);
+
+cairo_device_t *
+display_get_cairo_device(struct display *display);
 
 struct wl_compositor *
 display_get_compositor(struct display *display);
@@ -252,11 +256,30 @@ void
 window_set_buffer_transform(struct window *window,
 			    enum wl_output_transform transform);
 
+uint32_t
+window_get_buffer_scale(struct window *window);
+
+void
+window_set_buffer_scale(struct window *window,
+                        int32_t scale);
+
+uint32_t
+window_get_output_scale(struct window *window);
+
 void
 window_destroy(struct window *window);
 
 struct widget *
 window_add_widget(struct window *window, void *data);
+
+enum subsurface_mode {
+	SUBSURFACE_SYNCHRONIZED,
+	SUBSURFACE_DESYNCHRONIZED
+};
+
+struct widget *
+window_add_subsurface(struct window *window, void *data,
+		      enum subsurface_mode default_mode);
 
 typedef void (*data_func_t)(void *data, size_t len,
 			    int32_t x, int32_t y, void *user_data);
@@ -385,6 +408,15 @@ widget_get_user_data(struct widget *widget);
 cairo_t *
 widget_cairo_create(struct widget *widget);
 
+struct wl_surface *
+widget_get_wl_surface(struct widget *widget);
+
+uint32_t
+widget_get_last_time(struct widget *widget);
+
+void
+widget_input_region_add(struct widget *widget, const struct rectangle *rect);
+
 void
 widget_set_redraw_handler(struct widget *widget,
 			  widget_redraw_handler_t handler);
@@ -484,6 +516,9 @@ output_get_wl_output(struct output *output);
 
 enum wl_output_transform
 output_get_transform(struct output *output);
+
+uint32_t
+output_get_scale(struct output *output);
 
 void
 keysym_modifiers_add(struct wl_array *modifiers_map,

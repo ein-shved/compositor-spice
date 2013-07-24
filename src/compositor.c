@@ -22,8 +22,6 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
-
 #include "config.h"
 
 #include <fcntl.h>
@@ -56,6 +54,7 @@
 
 #include <wayland-server.h>
 #include "compositor.h"
+#include "subsurface-server-protocol.h"
 #include "../shared/os-compatibility.h"
 #include "git-version.h"
 #include "version.h"
@@ -91,10 +90,14 @@ sigchld_handler(int signal_number, void *data)
 }
 
 static void
-weston_output_transform_init(struct weston_output *output, uint32_t transform);
+weston_output_transform_scale_init(struct weston_output *output,
+				   uint32_t transform, uint32_t scale);
+
+static void
+weston_compositor_build_surface_list(struct weston_compositor *compositor);
 
 WL_EXPORT int
-weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode)
+weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode, int32_t scale)
 {
 	struct weston_seat *seat;
 	pixman_region32_t old_output_region;
@@ -107,11 +110,13 @@ weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode
 	if (ret < 0)
 		return ret;
 
+        output->scale = scale;
+
 	pixman_region32_init(&old_output_region);
 	pixman_region32_copy(&old_output_region, &output->region);
 
 	/* Update output region and transformation matrix */
-	weston_output_transform_init(output, output->transform);
+	weston_output_transform_scale_init(output, output->transform, output->scale);
 
 	pixman_region32_init(&output->previous_damage);
 	pixman_region32_init_rect(&output->region, output->x, output->y,
@@ -122,7 +127,7 @@ weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode
 	/* If a pointer falls outside the outputs new geometry, move it to its
 	 * lower-right corner */
 	wl_list_for_each(seat, &output->compositor->seat_list, link) {
-		struct wl_pointer *pointer = seat->seat.pointer;
+		struct weston_pointer *pointer = seat->pointer;
 		int32_t x, y;
 
 		if (!pointer)
@@ -217,7 +222,7 @@ weston_client_launch(struct weston_compositor *compositor,
 
 	if (pid == 0) {
 		child_client_exec(sv[1], path);
-		exit(-1);
+		_exit(-1);
 	}
 
 	close(sv[1]);
@@ -262,6 +267,9 @@ region_init_infinite(pixman_region32_t *region)
 				  UINT32_MAX, UINT32_MAX);
 }
 
+static struct weston_subsurface *
+weston_surface_to_subsurface(struct weston_surface *surface);
+
 WL_EXPORT struct weston_surface *
 weston_surface_create(struct weston_compositor *compositor)
 {
@@ -271,12 +279,12 @@ weston_surface_create(struct weston_compositor *compositor)
 	if (surface == NULL)
 		return NULL;
 
-	wl_signal_init(&surface->surface.resource.destroy_signal);
+	wl_signal_init(&surface->destroy_signal);
+
+	surface->resource = NULL;
 
 	wl_list_init(&surface->link);
 	wl_list_init(&surface->layer_link);
-
-	surface->surface.resource.client = NULL;
 
 	surface->compositor = compositor;
 	surface->alpha = 1.0;
@@ -287,7 +295,9 @@ weston_surface_create(struct weston_compositor *compositor)
 	}
 
 	surface->buffer_transform = WL_OUTPUT_TRANSFORM_NORMAL;
+	surface->buffer_scale = 1;
 	surface->pending.buffer_transform = surface->buffer_transform;
+	surface->pending.buffer_scale = surface->buffer_scale;
 	surface->output = NULL;
 	surface->plane = &compositor->primary_plane;
 	surface->pending.newly_attached = 0;
@@ -313,6 +323,9 @@ weston_surface_create(struct weston_compositor *compositor)
 	pixman_region32_init(&surface->pending.opaque);
 	region_init_infinite(&surface->pending.input);
 	wl_list_init(&surface->pending.frame_callback_list);
+
+	wl_list_init(&surface->subsurface_list);
+	wl_list_init(&surface->subsurface_list_pending);
 
 	return surface;
 }
@@ -353,6 +366,7 @@ weston_surface_to_global_float(struct weston_surface *surface,
 WL_EXPORT void
 weston_transformed_coord(int width, int height,
 			 enum wl_output_transform transform,
+			 int32_t scale,
 			 float sx, float sy, float *bx, float *by)
 {
 	switch (transform) {
@@ -390,20 +404,24 @@ weston_transformed_coord(int width, int height,
 		*by = sx;
 		break;
 	}
+
+	*bx *= scale;
+	*by *= scale;
 }
 
 WL_EXPORT pixman_box32_t
 weston_transformed_rect(int width, int height,
 			enum wl_output_transform transform,
+			int32_t scale,
 			pixman_box32_t rect)
 {
 	float x1, x2, y1, y2;
 
 	pixman_box32_t ret;
 
-	weston_transformed_coord(width, height, transform,
+	weston_transformed_coord(width, height, transform, scale,
 				 rect.x1, rect.y1, &x1, &y1);
-	weston_transformed_coord(width, height, transform,
+	weston_transformed_coord(width, height, transform, scale,
 				 rect.x2, rect.y2, &x2, &y2);
 
 	if (x1 <= x2) {
@@ -432,7 +450,23 @@ weston_surface_to_buffer_float(struct weston_surface *surface,
 	weston_transformed_coord(surface->geometry.width,
 				 surface->geometry.height,
 				 surface->buffer_transform,
+				 surface->buffer_scale,
 				 sx, sy, bx, by);
+}
+
+WL_EXPORT void
+weston_surface_to_buffer(struct weston_surface *surface,
+			 int sx, int sy, int *bx, int *by)
+{
+	float bxf, byf;
+
+	weston_transformed_coord(surface->geometry.width,
+				 surface->geometry.height,
+				 surface->buffer_transform,
+				 surface->buffer_scale,
+				 sx, sy, &bxf, &byf);
+	*bx = floorf(bxf);
+	*by = floorf(byf);
 }
 
 WL_EXPORT pixman_box32_t
@@ -441,7 +475,9 @@ weston_surface_to_buffer_rect(struct weston_surface *surface,
 {
 	return weston_transformed_rect(surface->geometry.width,
 				       surface->geometry.height,
-				       surface->buffer_transform, rect);
+				       surface->buffer_transform,
+				       surface->buffer_scale,
+				       rect);
 }
 
 WL_EXPORT void
@@ -469,19 +505,6 @@ weston_surface_damage_below(struct weston_surface *surface)
 	pixman_region32_fini(&damage);
 }
 
-static struct wl_resource *
-find_resource_for_client(struct wl_list *list, struct wl_client *client)
-{
-        struct wl_resource *r;
-
-        wl_list_for_each(r, list, link) {
-                if (r->client == client)
-                        return r;
-        }
-
-        return NULL;
-}
-
 static void
 weston_surface_update_output_mask(struct weston_surface *es, uint32_t mask)
 {
@@ -490,25 +513,27 @@ weston_surface_update_output_mask(struct weston_surface *es, uint32_t mask)
 	uint32_t left = es->output_mask & different;
 	struct weston_output *output;
 	struct wl_resource *resource = NULL;
-	struct wl_client *client = es->surface.resource.client;
+	struct wl_client *client;
 
 	es->output_mask = mask;
-	if (es->surface.resource.client == NULL)
+	if (es->resource == NULL)
 		return;
 	if (different == 0)
 		return;
 
+	client = wl_resource_get_client(es->resource);
+
 	wl_list_for_each(output, &es->compositor->output_list, link) {
 		if (1 << output->id & different)
 			resource =
-				find_resource_for_client(&output->resource_list,
+				wl_resource_find_for_client(&output->resource_list,
 							 client);
 		if (resource == NULL)
 			continue;
 		if (1 << output->id & entered)
-			wl_surface_send_enter(&es->surface.resource, resource);
+			wl_surface_send_enter(es->resource, resource);
 		if (1 << output->id & left)
-			wl_surface_send_leave(&es->surface.resource, resource);
+			wl_surface_send_leave(es->resource, resource);
 	}
 }
 
@@ -693,6 +718,8 @@ weston_surface_update_transform(struct weston_surface *surface)
 	weston_surface_damage_below(surface);
 
 	weston_surface_assign_output(surface);
+
+	wl_signal_emit(&surface->compositor->transform_signal, surface);
 }
 
 WL_EXPORT void
@@ -849,7 +876,7 @@ weston_surface_set_transform_parent(struct weston_surface *surface,
 	surface->geometry.parent_destroy_listener.notify =
 		transform_parent_handle_parent_destroy;
 	if (parent) {
-		wl_signal_add(&parent->surface.resource.destroy_signal,
+		wl_signal_add(&parent->destroy_signal,
 			      &surface->geometry.parent_destroy_listener);
 		wl_list_insert(&parent->geometry.child_list,
 			       &surface->geometry.parent_link);
@@ -870,29 +897,37 @@ weston_surface_is_mapped(struct weston_surface *surface)
 WL_EXPORT int32_t
 weston_surface_buffer_width(struct weston_surface *surface)
 {
+	int32_t width;
 	switch (surface->buffer_transform) {
 	case WL_OUTPUT_TRANSFORM_90:
 	case WL_OUTPUT_TRANSFORM_270:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		return surface->buffer_ref.buffer->height;
+		width = surface->buffer_ref.buffer->height;
+                break;
 	default:
-		return surface->buffer_ref.buffer->width;
+		width = surface->buffer_ref.buffer->width;
+                break;
 	}
+	return width / surface->buffer_scale;
 }
 
 WL_EXPORT int32_t
 weston_surface_buffer_height(struct weston_surface *surface)
 {
+	int32_t height;
 	switch (surface->buffer_transform) {
 	case WL_OUTPUT_TRANSFORM_90:
 	case WL_OUTPUT_TRANSFORM_270:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		return surface->buffer_ref.buffer->width;
+		height = surface->buffer_ref.buffer->width;
+                break;
 	default:
-		return surface->buffer_ref.buffer->height;
+		height = surface->buffer_ref.buffer->height;
+                break;
 	}
+	return height / surface->buffer_scale;
 }
 
 WL_EXPORT uint32_t
@@ -905,7 +940,7 @@ weston_compositor_get_time(void)
        return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
-static struct weston_surface *
+WL_EXPORT struct weston_surface *
 weston_compositor_pick_surface(struct weston_compositor *compositor,
 			       wl_fixed_t x, wl_fixed_t y,
 			       wl_fixed_t *sx, wl_fixed_t *sy)
@@ -925,39 +960,6 @@ weston_compositor_pick_surface(struct weston_compositor *compositor,
 }
 
 static void
-weston_device_repick(struct weston_seat *seat)
-{
-	const struct wl_pointer_grab_interface *interface;
-	struct weston_surface *surface, *focus;
-	struct wl_pointer *pointer = seat->seat.pointer;
-
-	if (!pointer)
-		return;
-
-	surface = weston_compositor_pick_surface(seat->compositor,
-						 pointer->x,
-						 pointer->y,
-						 &pointer->current_x,
-						 &pointer->current_y);
-
-	if (&surface->surface != pointer->current) {
-		interface = pointer->grab->interface;
-		wl_pointer_set_current(pointer, &surface->surface);
-		interface->focus(pointer->grab, &surface->surface,
-				 pointer->current_x,
-				 pointer->current_y);
-	}
-
-	focus = (struct weston_surface *) pointer->grab->focus;
-	if (focus)
-		weston_surface_from_global_fixed(focus,
-						 pointer->x,
-						 pointer->y,
-					         &pointer->grab->x,
-					         &pointer->grab->y);
-}
-
-static void
 weston_compositor_repick(struct weston_compositor *compositor)
 {
 	struct weston_seat *seat;
@@ -966,7 +968,7 @@ weston_compositor_repick(struct weston_compositor *compositor)
 		return;
 
 	wl_list_for_each(seat, &compositor->seat_list, link)
-		weston_device_repick(seat);
+		weston_seat_repick(seat);
 }
 
 WL_EXPORT void
@@ -979,42 +981,44 @@ weston_surface_unmap(struct weston_surface *surface)
 	wl_list_remove(&surface->layer_link);
 
 	wl_list_for_each(seat, &surface->compositor->seat_list, link) {
-		if (seat->seat.keyboard &&
-		    seat->seat.keyboard->focus == &surface->surface)
-			wl_keyboard_set_focus(seat->seat.keyboard, NULL);
-		if (seat->seat.pointer &&
-		    seat->seat.pointer->focus == &surface->surface)
-			wl_pointer_set_focus(seat->seat.pointer,
-					     NULL,
-					     wl_fixed_from_int(0),
-					     wl_fixed_from_int(0));
+		if (seat->keyboard && seat->keyboard->focus == surface)
+			weston_keyboard_set_focus(seat->keyboard, NULL);
+		if (seat->pointer && seat->pointer->focus == surface)
+			weston_pointer_set_focus(seat->pointer,
+						 NULL,
+						 wl_fixed_from_int(0),
+						 wl_fixed_from_int(0));
 	}
 
 	weston_surface_schedule_repaint(surface);
 }
 
 struct weston_frame_callback {
-	struct wl_resource resource;
+	struct wl_resource *resource;
 	struct wl_list link;
 };
 
-static void
-destroy_surface(struct wl_resource *resource)
+
+WL_EXPORT void
+weston_surface_destroy(struct weston_surface *surface)
 {
-	struct weston_surface *surface =
-		container_of(resource,
-			     struct weston_surface, surface.resource);
+	wl_signal_emit(&surface->destroy_signal, &surface->resource);
+
 	struct weston_compositor *compositor = surface->compositor;
 	struct weston_frame_callback *cb, *next;
 
 	assert(wl_list_empty(&surface->geometry.child_list));
+	assert(wl_list_empty(&surface->subsurface_list_pending));
+	assert(wl_list_empty(&surface->subsurface_list));
 
-	if (weston_surface_is_mapped(surface))
+	if (weston_surface_is_mapped(surface)) {
 		weston_surface_unmap(surface);
+		weston_compositor_build_surface_list(compositor);
+	}
 
 	wl_list_for_each_safe(cb, next,
 			      &surface->pending.frame_callback_list, link)
-		wl_resource_destroy(&cb->resource);
+		wl_resource_destroy(cb->resource);
 
 	pixman_region32_fini(&surface->pending.input);
 	pixman_region32_fini(&surface->pending.opaque);
@@ -1034,22 +1038,55 @@ destroy_surface(struct wl_resource *resource)
 	pixman_region32_fini(&surface->input);
 
 	wl_list_for_each_safe(cb, next, &surface->frame_callback_list, link)
-		wl_resource_destroy(&cb->resource);
+		wl_resource_destroy(cb->resource);
 
 	weston_surface_set_transform_parent(surface, NULL);
 
 	free(surface);
 }
 
-WL_EXPORT void
-weston_surface_destroy(struct weston_surface *surface)
+static void
+destroy_surface(struct wl_resource *resource)
 {
-	/* Not a valid way to destroy a client surface */
-	assert(surface->surface.resource.client == NULL);
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 
-	wl_signal_emit(&surface->surface.resource.destroy_signal,
-		       &surface->surface.resource);
-	destroy_surface(&surface->surface.resource);
+	weston_surface_destroy(surface);
+}
+
+static void
+weston_buffer_destroy_handler(struct wl_listener *listener, void *data)
+{
+	struct weston_buffer *buffer =
+		container_of(listener, struct weston_buffer, destroy_listener);
+
+	wl_signal_emit(&buffer->destroy_signal, buffer);
+	free(buffer);
+}
+
+struct weston_buffer *
+weston_buffer_from_resource(struct wl_resource *resource)
+{
+	struct weston_buffer *buffer;
+	struct wl_listener *listener;
+	
+	listener = wl_resource_get_destroy_listener(resource,
+						    weston_buffer_destroy_handler);
+
+	if (listener) {
+		buffer = container_of(listener, struct weston_buffer,
+				      destroy_listener);
+	} else {
+		buffer = malloc(sizeof *buffer);
+		memset(buffer, 0, sizeof *buffer);
+
+		buffer->resource = resource;
+		wl_signal_init(&buffer->destroy_signal);
+		buffer->destroy_listener.notify = weston_buffer_destroy_handler;
+		wl_resource_add_destroy_listener(resource,
+						 &buffer->destroy_listener);
+	}
+	
+	return buffer;
 }
 
 static void
@@ -1060,19 +1097,19 @@ weston_buffer_reference_handle_destroy(struct wl_listener *listener,
 		container_of(listener, struct weston_buffer_reference,
 			     destroy_listener);
 
-	assert((struct wl_buffer *)data == ref->buffer);
+	assert((struct weston_buffer *)data == ref->buffer);
 	ref->buffer = NULL;
 }
 
 WL_EXPORT void
 weston_buffer_reference(struct weston_buffer_reference *ref,
-			struct wl_buffer *buffer)
+			struct weston_buffer *buffer)
 {
 	if (ref->buffer && buffer != ref->buffer) {
 		ref->buffer->busy_count--;
 		if (ref->buffer->busy_count == 0) {
-			assert(ref->buffer->resource.client != NULL);
-			wl_resource_queue_event(&ref->buffer->resource,
+			assert(wl_resource_get_client(ref->buffer->resource));
+			wl_resource_queue_event(ref->buffer->resource,
 						WL_BUFFER_RELEASE);
 		}
 		wl_list_remove(&ref->destroy_listener.link);
@@ -1080,7 +1117,7 @@ weston_buffer_reference(struct weston_buffer_reference *ref,
 
 	if (buffer && buffer != ref->buffer) {
 		buffer->busy_count++;
-		wl_signal_add(&buffer->resource.destroy_signal,
+		wl_signal_add(&buffer->destroy_signal,
 			      &ref->destroy_listener);
 	}
 
@@ -1089,7 +1126,8 @@ weston_buffer_reference(struct weston_buffer_reference *ref,
 }
 
 static void
-weston_surface_attach(struct weston_surface *surface, struct wl_buffer *buffer)
+weston_surface_attach(struct weston_surface *surface,
+		      struct weston_buffer *buffer)
 {
 	weston_buffer_reference(&surface->buffer_ref, buffer);
 
@@ -1135,7 +1173,7 @@ surface_accumulate_damage(struct weston_surface *surface,
 			  pixman_region32_t *opaque)
 {
 	if (surface->buffer_ref.buffer &&
-	    wl_buffer_is_shm(surface->buffer_ref.buffer))
+	    wl_shm_buffer_get(surface->buffer_ref.buffer->resource))
 		surface->compositor->renderer->flush_damage(surface);
 
 	if (surface->transform.enabled) {
@@ -1205,38 +1243,72 @@ compositor_accumulate_damage(struct weston_compositor *ec)
 }
 
 static void
+surface_list_add(struct weston_compositor *compositor,
+		 struct weston_surface *surface)
+{
+	struct weston_subsurface *sub;
+
+	if (wl_list_empty(&surface->subsurface_list)) {
+		weston_surface_update_transform(surface);
+		wl_list_insert(compositor->surface_list.prev, &surface->link);
+		return;
+	}
+
+	wl_list_for_each(sub, &surface->subsurface_list, parent_link) {
+		if (!weston_surface_is_mapped(sub->surface))
+			continue;
+
+		if (sub->surface == surface) {
+			weston_surface_update_transform(sub->surface);
+			wl_list_insert(compositor->surface_list.prev,
+				       &sub->surface->link);
+		} else {
+			surface_list_add(compositor, sub->surface);
+		}
+	}
+}
+
+static void
+weston_compositor_build_surface_list(struct weston_compositor *compositor)
+{
+	struct weston_surface *surface;
+	struct weston_layer *layer;
+
+	wl_list_init(&compositor->surface_list);
+	wl_list_for_each(layer, &compositor->layer_list, link) {
+		wl_list_for_each(surface, &layer->surface_list, layer_link) {
+			surface_list_add(compositor, surface);
+		}
+	}
+}
+
+static void
 weston_output_repaint(struct weston_output *output, uint32_t msecs)
 {
 	struct weston_compositor *ec = output->compositor;
 	struct weston_surface *es;
-	struct weston_layer *layer;
 	struct weston_animation *animation, *next;
 	struct weston_frame_callback *cb, *cnext;
 	struct wl_list frame_callback_list;
 	pixman_region32_t output_damage;
 
-	weston_compositor_update_drag_surfaces(ec);
-
 	/* Rebuild the surface list and update surface transforms up front. */
-	wl_list_init(&ec->surface_list);
-	wl_list_init(&frame_callback_list);
-	wl_list_for_each(layer, &ec->layer_list, link) {
-		wl_list_for_each(es, &layer->surface_list, layer_link) {
-			weston_surface_update_transform(es);
-			wl_list_insert(ec->surface_list.prev, &es->link);
-			if (es->output == output) {
-				wl_list_insert_list(&frame_callback_list,
-						    &es->frame_callback_list);
-				wl_list_init(&es->frame_callback_list);
-			}
-		}
-	}
+	weston_compositor_build_surface_list(ec);
 
 	if (output->assign_planes && !output->disable_planes)
 		output->assign_planes(output);
 	else
 		wl_list_for_each(es, &ec->surface_list, link)
 			weston_surface_move_to_plane(es, &ec->primary_plane);
+
+	wl_list_init(&frame_callback_list);
+	wl_list_for_each(es, &ec->surface_list, link) {
+		if (es->output == output) {
+			wl_list_insert_list(&frame_callback_list,
+					    &es->frame_callback_list);
+			wl_list_init(&es->frame_callback_list);
+		}
+	}
 
 	compositor_accumulate_damage(ec);
 
@@ -1259,8 +1331,8 @@ weston_output_repaint(struct weston_output *output, uint32_t msecs)
 	wl_event_loop_dispatch(ec->input_loop, 0);
 
 	wl_list_for_each_safe(cb, cnext, &frame_callback_list, link) {
-		wl_callback_send_done(&cb->resource, msecs);
-		wl_resource_destroy(&cb->resource);
+		wl_callback_send_done(cb->resource, msecs);
+		wl_resource_destroy(cb->resource);
 	}
 
 	wl_list_for_each_safe(animation, next, &output->animation_list, link) {
@@ -1363,11 +1435,11 @@ surface_attach(struct wl_client *client,
 	       struct wl_resource *resource,
 	       struct wl_resource *buffer_resource, int32_t sx, int32_t sy)
 {
-	struct weston_surface *surface = resource->data;
-	struct wl_buffer *buffer = NULL;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
+	struct weston_buffer *buffer = NULL;
 
 	if (buffer_resource)
-		buffer = buffer_resource->data;
+		buffer = weston_buffer_from_resource(buffer_resource);
 
 	/* Attach, attach, without commit in between does not send
 	 * wl_buffer.release. */
@@ -1379,7 +1451,7 @@ surface_attach(struct wl_client *client,
 	surface->pending.buffer = buffer;
 	surface->pending.newly_attached = 1;
 	if (buffer) {
-		wl_signal_add(&buffer->resource.destroy_signal,
+		wl_signal_add(&buffer->destroy_signal,
 			      &surface->pending.buffer_destroy_listener);
 	}
 }
@@ -1389,7 +1461,7 @@ surface_damage(struct wl_client *client,
 	       struct wl_resource *resource,
 	       int32_t x, int32_t y, int32_t width, int32_t height)
 {
-	struct weston_surface *surface = resource->data;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 
 	pixman_region32_union_rect(&surface->pending.damage,
 				   &surface->pending.damage,
@@ -1399,7 +1471,7 @@ surface_damage(struct wl_client *client,
 static void
 destroy_frame_callback(struct wl_resource *resource)
 {
-	struct weston_frame_callback *cb = resource->data;
+	struct weston_frame_callback *cb = wl_resource_get_user_data(resource);
 
 	wl_list_remove(&cb->link);
 	free(cb);
@@ -1410,7 +1482,7 @@ surface_frame(struct wl_client *client,
 	      struct wl_resource *resource, uint32_t callback)
 {
 	struct weston_frame_callback *cb;
-	struct weston_surface *surface = resource->data;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 
 	cb = malloc(sizeof *cb);
 	if (cb == NULL) {
@@ -1418,13 +1490,12 @@ surface_frame(struct wl_client *client,
 		return;
 	}
 
-	cb->resource.object.interface = &wl_callback_interface;
-	cb->resource.object.id = callback;
-	cb->resource.destroy = destroy_frame_callback;
-	cb->resource.client = client;
-	cb->resource.data = cb;
+	cb->resource = wl_resource_create(client,
+						      &wl_callback_interface,
+						      1, callback);
+	wl_resource_set_implementation(cb->resource, NULL, cb,
+				       destroy_frame_callback);
 
-	wl_client_add_resource(client, &cb->resource);
 	wl_list_insert(surface->pending.frame_callback_list.prev, &cb->link);
 }
 
@@ -1433,11 +1504,11 @@ surface_set_opaque_region(struct wl_client *client,
 			  struct wl_resource *resource,
 			  struct wl_resource *region_resource)
 {
-	struct weston_surface *surface = resource->data;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 	struct weston_region *region;
 
 	if (region_resource) {
-		region = region_resource->data;
+		region = wl_resource_get_user_data(region_resource);
 		pixman_region32_copy(&surface->pending.opaque,
 				     &region->region);
 	} else {
@@ -1450,11 +1521,11 @@ surface_set_input_region(struct wl_client *client,
 			 struct wl_resource *resource,
 			 struct wl_resource *region_resource)
 {
-	struct weston_surface *surface = resource->data;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 	struct weston_region *region;
 
 	if (region_resource) {
-		region = region_resource->data;
+		region = wl_resource_get_user_data(region_resource);
 		pixman_region32_copy(&surface->pending.input,
 				     &region->region);
 	} else {
@@ -1464,29 +1535,43 @@ surface_set_input_region(struct wl_client *client,
 }
 
 static void
-surface_commit(struct wl_client *client, struct wl_resource *resource)
+weston_surface_commit_subsurface_order(struct weston_surface *surface)
 {
-	struct weston_surface *surface = resource->data;
-	pixman_region32_t opaque;
-	int buffer_width = 0;
-	int buffer_height = 0;
+	struct weston_subsurface *sub;
 
-	/* wl_surface.set_buffer_rotation */
+	wl_list_for_each_reverse(sub, &surface->subsurface_list_pending,
+				 parent_link_pending) {
+		wl_list_remove(&sub->parent_link);
+		wl_list_insert(&surface->subsurface_list, &sub->parent_link);
+	}
+}
+
+static void
+weston_surface_commit(struct weston_surface *surface)
+{
+	pixman_region32_t opaque;
+	int surface_width = 0;
+	int surface_height = 0;
+
+	/* wl_surface.set_buffer_transform */
 	surface->buffer_transform = surface->pending.buffer_transform;
+
+	/* wl_surface.set_buffer_scale */
+	surface->buffer_scale = surface->pending.buffer_scale;
 
 	/* wl_surface.attach */
 	if (surface->pending.buffer || surface->pending.newly_attached)
 		weston_surface_attach(surface, surface->pending.buffer);
 
 	if (surface->buffer_ref.buffer) {
-		buffer_width = weston_surface_buffer_width(surface);
-		buffer_height = weston_surface_buffer_height(surface);
+		surface_width = weston_surface_buffer_width(surface);
+		surface_height = weston_surface_buffer_height(surface);
 	}
 
 	if (surface->configure && surface->pending.newly_attached)
 		surface->configure(surface,
 				   surface->pending.sx, surface->pending.sy,
-				   buffer_width, buffer_height);
+				   surface_width, surface_height);
 
 	if (surface->pending.buffer)
 		wl_list_remove(&surface->pending.buffer_destroy_listener.link);
@@ -1531,16 +1616,54 @@ surface_commit(struct wl_client *client, struct wl_resource *resource)
 			    &surface->pending.frame_callback_list);
 	wl_list_init(&surface->pending.frame_callback_list);
 
+	weston_surface_commit_subsurface_order(surface);
+
 	weston_surface_schedule_repaint(surface);
+}
+
+static void
+weston_subsurface_commit(struct weston_subsurface *sub);
+
+static void
+weston_subsurface_parent_commit(struct weston_subsurface *sub,
+				int parent_is_synchronized);
+
+static void
+surface_commit(struct wl_client *client, struct wl_resource *resource)
+{
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
+	struct weston_subsurface *sub = weston_surface_to_subsurface(surface);
+
+	if (sub) {
+		weston_subsurface_commit(sub);
+		return;
+	}
+
+	weston_surface_commit(surface);
+
+	wl_list_for_each(sub, &surface->subsurface_list, parent_link) {
+		if (sub->surface != surface)
+			weston_subsurface_parent_commit(sub, 0);
+	}
 }
 
 static void
 surface_set_buffer_transform(struct wl_client *client,
 			     struct wl_resource *resource, int transform)
 {
-	struct weston_surface *surface = resource->data;
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
 
 	surface->pending.buffer_transform = transform;
+}
+
+static void
+surface_set_buffer_scale(struct wl_client *client,
+			 struct wl_resource *resource,
+			 int32_t scale)
+{
+	struct weston_surface *surface = wl_resource_get_user_data(resource);
+
+	surface->pending.buffer_scale = scale;
 }
 
 static const struct wl_surface_interface surface_interface = {
@@ -1551,14 +1674,15 @@ static const struct wl_surface_interface surface_interface = {
 	surface_set_opaque_region,
 	surface_set_input_region,
 	surface_commit,
-	surface_set_buffer_transform
+	surface_set_buffer_transform,
+	surface_set_buffer_scale
 };
 
 static void
 compositor_create_surface(struct wl_client *client,
 			  struct wl_resource *resource, uint32_t id)
 {
-	struct weston_compositor *ec = resource->data;
+	struct weston_compositor *ec = wl_resource_get_user_data(resource);
 	struct weston_surface *surface;
 
 	surface = weston_surface_create(ec);
@@ -1567,22 +1691,17 @@ compositor_create_surface(struct wl_client *client,
 		return;
 	}
 
-	surface->surface.resource.destroy = destroy_surface;
-
-	surface->surface.resource.object.id = id;
-	surface->surface.resource.object.interface = &wl_surface_interface;
-	surface->surface.resource.object.implementation =
-		(void (**)(void)) &surface_interface;
-	surface->surface.resource.data = surface;
-
-	wl_client_add_resource(client, &surface->surface.resource);
+	surface->resource =
+		wl_resource_create(client, &wl_surface_interface,
+				   wl_resource_get_version(resource), id);
+	wl_resource_set_implementation(surface->resource, &surface_interface,
+				       surface, destroy_surface);
 }
 
 static void
 destroy_region(struct wl_resource *resource)
 {
-	struct weston_region *region =
-		container_of(resource, struct weston_region, resource);
+	struct weston_region *region = wl_resource_get_user_data(resource);
 
 	pixman_region32_fini(&region->region);
 	free(region);
@@ -1598,7 +1717,7 @@ static void
 region_add(struct wl_client *client, struct wl_resource *resource,
 	   int32_t x, int32_t y, int32_t width, int32_t height)
 {
-	struct weston_region *region = resource->data;
+	struct weston_region *region = wl_resource_get_user_data(resource);
 
 	pixman_region32_union_rect(&region->region, &region->region,
 				   x, y, width, height);
@@ -1608,7 +1727,7 @@ static void
 region_subtract(struct wl_client *client, struct wl_resource *resource,
 		int32_t x, int32_t y, int32_t width, int32_t height)
 {
-	struct weston_region *region = resource->data;
+	struct weston_region *region = wl_resource_get_user_data(resource);
 	pixman_region32_t rect;
 
 	pixman_region32_init_rect(&rect, x, y, width, height);
@@ -1634,23 +1753,675 @@ compositor_create_region(struct wl_client *client,
 		return;
 	}
 
-	region->resource.destroy = destroy_region;
-
-	region->resource.object.id = id;
-	region->resource.object.interface = &wl_region_interface;
-	region->resource.object.implementation =
-		(void (**)(void)) &region_interface;
-	region->resource.data = region;
-
 	pixman_region32_init(&region->region);
 
-	wl_client_add_resource(client, &region->resource);
+	region->resource =
+		wl_resource_create(client, &wl_region_interface, 1, id);
+	wl_resource_set_implementation(region->resource, &region_interface,
+				       region, destroy_region);
 }
 
 static const struct wl_compositor_interface compositor_interface = {
 	compositor_create_surface,
 	compositor_create_region
 };
+
+static void
+weston_subsurface_commit_from_cache(struct weston_subsurface *sub)
+{
+	struct weston_surface *surface = sub->surface;
+	pixman_region32_t opaque;
+	int surface_width = 0;
+	int surface_height = 0;
+
+	/* wl_surface.set_buffer_transform */
+	surface->buffer_transform = sub->cached.buffer_transform;
+
+	/* wl_surface.set_buffer_scale */
+	surface->buffer_scale = sub->cached.buffer_scale;
+
+	/* wl_surface.attach */
+	if (sub->cached.buffer_ref.buffer || sub->cached.newly_attached)
+		weston_surface_attach(surface, sub->cached.buffer_ref.buffer);
+	weston_buffer_reference(&sub->cached.buffer_ref, NULL);
+
+	if (surface->buffer_ref.buffer) {
+		surface_width = weston_surface_buffer_width(surface);
+		surface_height = weston_surface_buffer_height(surface);
+	}
+
+	if (surface->configure && sub->cached.newly_attached)
+		surface->configure(surface, sub->cached.sx, sub->cached.sy,
+				   surface_width, surface_height);
+	sub->cached.sx = 0;
+	sub->cached.sy = 0;
+	sub->cached.newly_attached = 0;
+
+	/* wl_surface.damage */
+	pixman_region32_union(&surface->damage, &surface->damage,
+			      &sub->cached.damage);
+	pixman_region32_intersect_rect(&surface->damage, &surface->damage,
+				       0, 0,
+				       surface->geometry.width,
+				       surface->geometry.height);
+	empty_region(&sub->cached.damage);
+
+	/* wl_surface.set_opaque_region */
+	pixman_region32_init_rect(&opaque, 0, 0,
+				  surface->geometry.width,
+				  surface->geometry.height);
+	pixman_region32_intersect(&opaque,
+				  &opaque, &sub->cached.opaque);
+
+	if (!pixman_region32_equal(&opaque, &surface->opaque)) {
+		pixman_region32_copy(&surface->opaque, &opaque);
+		weston_surface_geometry_dirty(surface);
+	}
+
+	pixman_region32_fini(&opaque);
+
+	/* wl_surface.set_input_region */
+	pixman_region32_fini(&surface->input);
+	pixman_region32_init_rect(&surface->input, 0, 0,
+				  surface->geometry.width,
+				  surface->geometry.height);
+	pixman_region32_intersect(&surface->input,
+				  &surface->input, &sub->cached.input);
+
+	/* wl_surface.frame */
+	wl_list_insert_list(&surface->frame_callback_list,
+			    &sub->cached.frame_callback_list);
+	wl_list_init(&sub->cached.frame_callback_list);
+
+	weston_surface_commit_subsurface_order(surface);
+
+	weston_surface_schedule_repaint(surface);
+
+	sub->cached.has_data = 0;
+}
+
+static void
+weston_subsurface_commit_to_cache(struct weston_subsurface *sub)
+{
+	struct weston_surface *surface = sub->surface;
+
+	/*
+	 * If this commit would cause the surface to move by the
+	 * attach(dx, dy) parameters, the old damage region must be
+	 * translated to correspond to the new surface coordinate system
+	 * origin.
+	 */
+	pixman_region32_translate(&sub->cached.damage,
+				  -surface->pending.sx, -surface->pending.sy);
+	pixman_region32_union(&sub->cached.damage, &sub->cached.damage,
+			      &surface->pending.damage);
+	empty_region(&surface->pending.damage);
+
+	if (surface->pending.newly_attached) {
+		sub->cached.newly_attached = 1;
+		weston_buffer_reference(&sub->cached.buffer_ref,
+					surface->pending.buffer);
+	}
+	sub->cached.sx += surface->pending.sx;
+	sub->cached.sy += surface->pending.sy;
+	surface->pending.sx = 0;
+	surface->pending.sy = 0;
+	surface->pending.newly_attached = 0;
+
+	sub->cached.buffer_transform = surface->pending.buffer_transform;
+	sub->cached.buffer_scale = surface->pending.buffer_scale;
+
+	pixman_region32_copy(&sub->cached.opaque, &surface->pending.opaque);
+
+	pixman_region32_copy(&sub->cached.input, &surface->pending.input);
+
+	wl_list_insert_list(&sub->cached.frame_callback_list,
+			    &surface->pending.frame_callback_list);
+	wl_list_init(&surface->pending.frame_callback_list);
+
+	sub->cached.has_data = 1;
+}
+
+static int
+weston_subsurface_is_synchronized(struct weston_subsurface *sub)
+{
+	while (sub) {
+		if (sub->synchronized)
+			return 1;
+
+		if (!sub->parent)
+			return 0;
+
+		sub = weston_surface_to_subsurface(sub->parent);
+	}
+
+	return 0;
+}
+
+static void
+weston_subsurface_commit(struct weston_subsurface *sub)
+{
+	struct weston_surface *surface = sub->surface;
+	struct weston_subsurface *tmp;
+
+	/* Recursive check for effectively synchronized. */
+	if (weston_subsurface_is_synchronized(sub)) {
+		weston_subsurface_commit_to_cache(sub);
+	} else {
+		if (sub->cached.has_data) {
+			/* flush accumulated state from cache */
+			weston_subsurface_commit_to_cache(sub);
+			weston_subsurface_commit_from_cache(sub);
+		} else {
+			weston_surface_commit(surface);
+		}
+
+		wl_list_for_each(tmp, &surface->subsurface_list, parent_link) {
+			if (tmp->surface != surface)
+				weston_subsurface_parent_commit(tmp, 0);
+		}
+	}
+}
+
+static void
+weston_subsurface_synchronized_commit(struct weston_subsurface *sub)
+{
+	struct weston_surface *surface = sub->surface;
+	struct weston_subsurface *tmp;
+
+	/* From now on, commit_from_cache the whole sub-tree, regardless of
+	 * the synchronized mode of each child. This sub-surface or some
+	 * of its ancestors were synchronized, so we are synchronized
+	 * all the way down.
+	 */
+
+	if (sub->cached.has_data)
+		weston_subsurface_commit_from_cache(sub);
+
+	wl_list_for_each(tmp, &surface->subsurface_list, parent_link) {
+		if (tmp->surface != surface)
+			weston_subsurface_parent_commit(tmp, 1);
+	}
+}
+
+static void
+weston_subsurface_parent_commit(struct weston_subsurface *sub,
+				int parent_is_synchronized)
+{
+	if (sub->position.set) {
+		weston_surface_set_position(sub->surface,
+					    sub->position.x, sub->position.y);
+		sub->position.set = 0;
+	}
+
+	if (parent_is_synchronized || sub->synchronized)
+		weston_subsurface_synchronized_commit(sub);
+}
+
+static void
+subsurface_configure(struct weston_surface *surface, int32_t dx, int32_t dy,
+		     int32_t width, int32_t height)
+{
+	struct weston_compositor *compositor = surface->compositor;
+
+	weston_surface_configure(surface,
+				 surface->geometry.x + dx,
+				 surface->geometry.y + dy,
+				 width, height);
+
+	/* No need to check parent mappedness, because if parent is not
+	 * mapped, parent is not in a visible layer, so this sub-surface
+	 * will not be drawn either.
+	 */
+	if (!weston_surface_is_mapped(surface)) {
+		wl_list_init(&surface->layer_link);
+
+		/* Cannot call weston_surface_update_transform(),
+		 * because that would call it also for the parent surface,
+		 * which might not be mapped yet. That would lead to
+		 * inconsistent state, where the window could never be
+		 * mapped.
+		 *
+		 * Instead just assing any output, to make
+		 * weston_surface_is_mapped() return true, so that when the
+		 * parent surface does get mapped, this one will get
+		 * included, too. See surface_list_add().
+		 */
+		assert(!wl_list_empty(&compositor->output_list));
+		surface->output = container_of(compositor->output_list.next,
+					       struct weston_output, link);
+	}
+}
+
+static struct weston_subsurface *
+weston_surface_to_subsurface(struct weston_surface *surface)
+{
+	if (surface->configure == subsurface_configure)
+		return surface->configure_private;
+
+	return NULL;
+}
+
+WL_EXPORT struct weston_surface *
+weston_surface_get_main_surface(struct weston_surface *surface)
+{
+	struct weston_subsurface *sub;
+
+	while (surface && (sub = weston_surface_to_subsurface(surface)))
+		surface = sub->parent;
+
+	return surface;
+}
+
+static void
+subsurface_set_position(struct wl_client *client,
+			struct wl_resource *resource, int32_t x, int32_t y)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+
+	if (!sub)
+		return;
+
+	sub->position.x = x;
+	sub->position.y = y;
+	sub->position.set = 1;
+}
+
+static struct weston_subsurface *
+subsurface_from_surface(struct weston_surface *surface)
+{
+	struct weston_subsurface *sub;
+
+	sub = weston_surface_to_subsurface(surface);
+	if (sub)
+		return sub;
+
+	wl_list_for_each(sub, &surface->subsurface_list, parent_link)
+		if (sub->surface == surface)
+			return sub;
+
+	return NULL;
+}
+
+static struct weston_subsurface *
+subsurface_sibling_check(struct weston_subsurface *sub,
+			 struct weston_surface *surface,
+			 const char *request)
+{
+	struct weston_subsurface *sibling;
+
+	sibling = subsurface_from_surface(surface);
+
+	if (!sibling) {
+		wl_resource_post_error(sub->resource,
+			WL_SUBSURFACE_ERROR_BAD_SURFACE,
+			"%s: wl_surface@%d is not a parent or sibling",
+			request, wl_resource_get_id(surface->resource));
+		return NULL;
+	}
+
+	if (sibling->parent != sub->parent) {
+		wl_resource_post_error(sub->resource,
+			WL_SUBSURFACE_ERROR_BAD_SURFACE,
+			"%s: wl_surface@%d has a different parent",
+			request, wl_resource_get_id(surface->resource));
+		return NULL;
+	}
+
+	return sibling;
+}
+
+static void
+subsurface_place_above(struct wl_client *client,
+		       struct wl_resource *resource,
+		       struct wl_resource *sibling_resource)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+	struct weston_surface *surface =
+		wl_resource_get_user_data(sibling_resource);
+	struct weston_subsurface *sibling;
+
+	if (!sub)
+		return;
+
+	sibling = subsurface_sibling_check(sub, surface, "place_above");
+	if (!sibling)
+		return;
+
+	wl_list_remove(&sub->parent_link_pending);
+	wl_list_insert(sibling->parent_link_pending.prev,
+		       &sub->parent_link_pending);
+}
+
+static void
+subsurface_place_below(struct wl_client *client,
+		       struct wl_resource *resource,
+		       struct wl_resource *sibling_resource)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+	struct weston_surface *surface =
+		wl_resource_get_user_data(sibling_resource);
+	struct weston_subsurface *sibling;
+
+	if (!sub)
+		return;
+
+	sibling = subsurface_sibling_check(sub, surface, "place_below");
+	if (!sibling)
+		return;
+
+	wl_list_remove(&sub->parent_link_pending);
+	wl_list_insert(&sibling->parent_link_pending,
+		       &sub->parent_link_pending);
+}
+
+static void
+subsurface_set_sync(struct wl_client *client, struct wl_resource *resource)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+
+	if (sub)
+		sub->synchronized = 1;
+}
+
+static void
+subsurface_set_desync(struct wl_client *client, struct wl_resource *resource)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+
+	if (sub && sub->synchronized) {
+		sub->synchronized = 0;
+
+		/* If sub became effectively desynchronized, flush. */
+		if (!weston_subsurface_is_synchronized(sub))
+			weston_subsurface_synchronized_commit(sub);
+	}
+}
+
+static void
+weston_subsurface_cache_init(struct weston_subsurface *sub)
+{
+	pixman_region32_init(&sub->cached.damage);
+	pixman_region32_init(&sub->cached.opaque);
+	pixman_region32_init(&sub->cached.input);
+	wl_list_init(&sub->cached.frame_callback_list);
+	sub->cached.buffer_ref.buffer = NULL;
+}
+
+static void
+weston_subsurface_cache_fini(struct weston_subsurface *sub)
+{
+	struct weston_frame_callback *cb, *tmp;
+
+	wl_list_for_each_safe(cb, tmp, &sub->cached.frame_callback_list, link)
+		wl_resource_destroy(cb->resource);
+
+	weston_buffer_reference(&sub->cached.buffer_ref, NULL);
+	pixman_region32_fini(&sub->cached.damage);
+	pixman_region32_fini(&sub->cached.opaque);
+	pixman_region32_fini(&sub->cached.input);
+}
+
+static void
+weston_subsurface_unlink_parent(struct weston_subsurface *sub)
+{
+	wl_list_remove(&sub->parent_link);
+	wl_list_remove(&sub->parent_link_pending);
+	wl_list_remove(&sub->parent_destroy_listener.link);
+	sub->parent = NULL;
+}
+
+static void
+weston_subsurface_destroy(struct weston_subsurface *sub);
+
+static void
+subsurface_handle_surface_destroy(struct wl_listener *listener, void *data)
+{
+	struct weston_subsurface *sub =
+		container_of(listener, struct weston_subsurface,
+			     surface_destroy_listener);
+	assert(data == &sub->surface->resource);
+
+	/* The protocol object (wl_resource) is left inert. */
+	if (sub->resource)
+		wl_resource_set_user_data(sub->resource, NULL);
+
+	weston_subsurface_destroy(sub);
+}
+
+static void
+subsurface_handle_parent_destroy(struct wl_listener *listener, void *data)
+{
+	struct weston_subsurface *sub =
+		container_of(listener, struct weston_subsurface,
+			     parent_destroy_listener);
+	assert(data == &sub->parent->resource);
+	assert(sub->surface != sub->parent);
+
+	if (weston_surface_is_mapped(sub->surface))
+		weston_surface_unmap(sub->surface);
+
+	weston_subsurface_unlink_parent(sub);
+}
+
+static void
+subsurface_resource_destroy(struct wl_resource *resource)
+{
+	struct weston_subsurface *sub = wl_resource_get_user_data(resource);
+
+	if (sub)
+		weston_subsurface_destroy(sub);
+}
+
+static void
+subsurface_destroy(struct wl_client *client, struct wl_resource *resource)
+{
+	wl_resource_destroy(resource);
+}
+
+static void
+weston_subsurface_link_parent(struct weston_subsurface *sub,
+			      struct weston_surface *parent)
+{
+	sub->parent = parent;
+	sub->parent_destroy_listener.notify = subsurface_handle_parent_destroy;
+	wl_signal_add(&parent->destroy_signal,
+		      &sub->parent_destroy_listener);
+
+	wl_list_insert(&parent->subsurface_list, &sub->parent_link);
+	wl_list_insert(&parent->subsurface_list_pending,
+		       &sub->parent_link_pending);
+}
+
+static void
+weston_subsurface_link_surface(struct weston_subsurface *sub,
+			       struct weston_surface *surface)
+{
+	sub->surface = surface;
+	sub->surface_destroy_listener.notify =
+		subsurface_handle_surface_destroy;
+	wl_signal_add(&surface->destroy_signal,
+		      &sub->surface_destroy_listener);
+}
+
+static void
+weston_subsurface_destroy(struct weston_subsurface *sub)
+{
+	assert(sub->surface);
+
+	if (sub->resource) {
+		assert(weston_surface_to_subsurface(sub->surface) == sub);
+		assert(sub->parent_destroy_listener.notify ==
+		       subsurface_handle_parent_destroy);
+
+		weston_surface_set_transform_parent(sub->surface, NULL);
+		if (sub->parent)
+			weston_subsurface_unlink_parent(sub);
+
+		weston_subsurface_cache_fini(sub);
+
+		sub->surface->configure = NULL;
+		sub->surface->configure_private = NULL;
+	} else {
+		/* the dummy weston_subsurface for the parent itself */
+		assert(sub->parent_destroy_listener.notify == NULL);
+		wl_list_remove(&sub->parent_link);
+		wl_list_remove(&sub->parent_link_pending);
+	}
+
+	wl_list_remove(&sub->surface_destroy_listener.link);
+	free(sub);
+}
+
+static const struct wl_subsurface_interface subsurface_implementation = {
+	subsurface_destroy,
+	subsurface_set_position,
+	subsurface_place_above,
+	subsurface_place_below,
+	subsurface_set_sync,
+	subsurface_set_desync
+};
+
+static struct weston_subsurface *
+weston_subsurface_create(uint32_t id, struct weston_surface *surface,
+			 struct weston_surface *parent)
+{
+	struct weston_subsurface *sub;
+	struct wl_client *client = wl_resource_get_client(surface->resource);
+
+	sub = calloc(1, sizeof *sub);
+	if (!sub)
+		return NULL;
+
+	sub->resource =
+		wl_resource_create(client, &wl_subsurface_interface, 1, id);
+	if (!sub->resource) {
+		free(sub);
+		return NULL;
+	}
+
+	wl_resource_set_implementation(sub->resource,
+				       &subsurface_implementation,
+				       sub, subsurface_resource_destroy);
+	weston_subsurface_link_surface(sub, surface);
+	weston_subsurface_link_parent(sub, parent);
+	weston_subsurface_cache_init(sub);
+	sub->synchronized = 1;
+	weston_surface_set_transform_parent(surface, parent);
+
+	return sub;
+}
+
+/* Create a dummy subsurface for having the parent itself in its
+ * sub-surface lists. Makes stacking order manipulation easy.
+ */
+static struct weston_subsurface *
+weston_subsurface_create_for_parent(struct weston_surface *parent)
+{
+	struct weston_subsurface *sub;
+
+	sub = calloc(1, sizeof *sub);
+	if (!sub)
+		return NULL;
+
+	weston_subsurface_link_surface(sub, parent);
+	sub->parent = parent;
+	wl_list_insert(&parent->subsurface_list, &sub->parent_link);
+	wl_list_insert(&parent->subsurface_list_pending,
+		       &sub->parent_link_pending);
+
+	return sub;
+}
+
+static void
+subcompositor_get_subsurface(struct wl_client *client,
+			     struct wl_resource *resource,
+			     uint32_t id,
+			     struct wl_resource *surface_resource,
+			     struct wl_resource *parent_resource)
+{
+	struct weston_surface *surface =
+		wl_resource_get_user_data(surface_resource);
+	struct weston_surface *parent =
+		wl_resource_get_user_data(parent_resource);
+	struct weston_subsurface *sub;
+	static const char where[] = "get_subsurface: wl_subsurface@";
+
+	if (surface == parent) {
+		wl_resource_post_error(resource,
+			WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+			"%s%d: wl_surface@%d cannot be its own parent",
+			where, id, wl_resource_get_id(surface_resource));
+		return;
+	}
+
+	if (weston_surface_to_subsurface(surface)) {
+		wl_resource_post_error(resource,
+			WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+			"%s%d: wl_surface@%d is already a sub-surface",
+			where, id, wl_resource_get_id(surface_resource));
+		return;
+	}
+
+	if (surface->configure) {
+		wl_resource_post_error(resource,
+			WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+			"%s%d: wl_surface@%d already has a role",
+			where, id, wl_resource_get_id(surface_resource));
+		return;
+	}
+
+	if (weston_surface_get_main_surface(parent) == surface) {
+		wl_resource_post_error(resource,
+			WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+			"%s%d: wl_surface@%d is an ancestor of parent",
+			where, id, wl_resource_get_id(surface_resource));
+		return;
+	}
+
+	/* make sure the parent is in its own list */
+	if (wl_list_empty(&parent->subsurface_list)) {
+		if (!weston_subsurface_create_for_parent(parent)) {
+			wl_resource_post_no_memory(resource);
+			return;
+		}
+	}
+
+	sub = weston_subsurface_create(id, surface, parent);
+	if (!sub) {
+		wl_resource_post_no_memory(resource);
+		return;
+	}
+
+	surface->configure = subsurface_configure;
+	surface->configure_private = sub;
+}
+
+static void
+subcompositor_destroy(struct wl_client *client, struct wl_resource *resource)
+{
+	wl_resource_destroy(resource);
+}
+
+static const struct wl_subcompositor_interface subcompositor_interface = {
+	subcompositor_destroy,
+	subcompositor_get_subsurface
+};
+
+static void
+bind_subcompositor(struct wl_client *client,
+		   void *data, uint32_t version, uint32_t id)
+{
+	struct weston_compositor *compositor = data;
+	struct wl_resource *resource;
+
+	resource =
+		wl_resource_create(client, &wl_subcompositor_interface, 1, id);
+	if (resource)
+		wl_resource_set_implementation(resource,
+					       &subcompositor_interface, 
+					       compositor, NULL);
+}
 
 static void
 weston_compositor_dpms(struct weston_compositor *compositor,
@@ -1707,20 +2478,6 @@ weston_compositor_sleep(struct weston_compositor *compositor)
 	weston_compositor_dpms(compositor, WESTON_DPMS_OFF);
 }
 
-static void
-weston_compositor_idle_inhibit(struct weston_compositor *compositor)
-{
-	weston_compositor_wake(compositor);
-	compositor->idle_inhibit++;
-}
-
-static void
-weston_compositor_idle_release(struct weston_compositor *compositor)
-{
-	compositor->idle_inhibit--;
-	weston_compositor_wake(compositor);
-}
-
 static int
 idle_handler(void *data)
 {
@@ -1742,6 +2499,10 @@ weston_plane_init(struct weston_plane *plane, int32_t x, int32_t y)
 	pixman_region32_init(&plane->clip);
 	plane->x = x;
 	plane->y = y;
+
+	/* Init the link so that the call to wl_list_remove() when releasing
+	 * the plane without ever stacking doesn't lead to a crash */
+	wl_list_init(&plane->link);
 }
 
 WL_EXPORT void
@@ -1749,6 +2510,8 @@ weston_plane_release(struct weston_plane *plane)
 {
 	pixman_region32_fini(&plane->damage);
 	pixman_region32_fini(&plane->clip);
+
+	wl_list_remove(&plane->link);
 }
 
 WL_EXPORT void
@@ -1762,1111 +2525,9 @@ weston_compositor_stack_plane(struct weston_compositor *ec,
 		wl_list_insert(&ec->plane_list, &plane->link);
 }
 
-static  void
-weston_seat_update_drag_surface(struct weston_seat *seat, int dx, int dy);
-
-static void
-clip_pointer_motion(struct weston_seat *seat, wl_fixed_t *fx, wl_fixed_t *fy)
-{
-	struct weston_compositor *ec = seat->compositor;
-	struct weston_output *output, *prev = NULL;
-	int x, y, old_x, old_y, valid = 0;
-
-	x = wl_fixed_to_int(*fx);
-	y = wl_fixed_to_int(*fy);
-	old_x = wl_fixed_to_int(seat->seat.pointer->x);
-	old_y = wl_fixed_to_int(seat->seat.pointer->y);
-
-	wl_list_for_each(output, &ec->output_list, link) {
-		if (pixman_region32_contains_point(&output->region,
-						   x, y, NULL))
-			valid = 1;
-		if (pixman_region32_contains_point(&output->region,
-						   old_x, old_y, NULL))
-			prev = output;
-	}
-
-	if (!valid) {
-		if (x < prev->x)
-			*fx = wl_fixed_from_int(prev->x);
-		else if (x >= prev->x + prev->width)
-			*fx = wl_fixed_from_int(prev->x +
-						prev->width - 1);
-		if (y < prev->y)
-			*fy = wl_fixed_from_int(prev->y);
-		else if (y >= prev->y + prev->current->height)
-			*fy = wl_fixed_from_int(prev->y +
-						prev->height - 1);
-	}
-}
-
-/* Takes absolute values */
-static void
-move_pointer(struct weston_seat *seat, wl_fixed_t x, wl_fixed_t y)
-{
-	struct weston_compositor *ec = seat->compositor;
-	struct wl_pointer *pointer = seat->seat.pointer;
-	struct weston_output *output;
-	int32_t ix, iy;
-
-	clip_pointer_motion(seat, &x, &y);
-
-	weston_seat_update_drag_surface(seat, x - pointer->x, y - pointer->y);
-
-	pointer->x = x;
-	pointer->y = y;
-
-	ix = wl_fixed_to_int(x);
-	iy = wl_fixed_to_int(y);
-
-	wl_list_for_each(output, &ec->output_list, link)
-		if (output->zoom.active &&
-		    pixman_region32_contains_point(&output->region,
-						   ix, iy, NULL))
-			weston_output_update_zoom(output, ZOOM_FOCUS_POINTER);
-
-	weston_device_repick(seat);
-
-	if (seat->sprite) {
-		weston_surface_set_position(seat->sprite,
-					    ix - seat->hotspot_x,
-					    iy - seat->hotspot_y);
-		weston_surface_schedule_repaint(seat->sprite);
-	}
-}
-
-WL_EXPORT void
-notify_motion(struct weston_seat *seat,
-	      uint32_t time, wl_fixed_t dx, wl_fixed_t dy)
-{
-	const struct wl_pointer_grab_interface *interface;
-	struct weston_compositor *ec = seat->compositor;
-	struct wl_pointer *pointer = seat->seat.pointer;
-
-	weston_compositor_wake(ec);
-
-	move_pointer(seat, pointer->x + dx, pointer->y + dy);
-
-	interface = pointer->grab->interface;
-	interface->motion(pointer->grab, time,
-			  pointer->grab->x, pointer->grab->y);
-}
-
-WL_EXPORT void
-notify_motion_absolute(struct weston_seat *seat,
-		       uint32_t time, wl_fixed_t x, wl_fixed_t y)
-{
-	const struct wl_pointer_grab_interface *interface;
-	struct weston_compositor *ec = seat->compositor;
-	struct wl_pointer *pointer = seat->seat.pointer;
-
-	weston_compositor_wake(ec);
-
-	move_pointer(seat, x, y);
-
-	interface = pointer->grab->interface;
-	interface->motion(pointer->grab, time,
-			  pointer->grab->x, pointer->grab->y);
-}
-
-WL_EXPORT void
-weston_surface_activate(struct weston_surface *surface,
-			struct weston_seat *seat)
-{
-	struct weston_compositor *compositor = seat->compositor;
-
-	if (seat->seat.keyboard) {
-		wl_keyboard_set_focus(seat->seat.keyboard, &surface->surface);
-		wl_data_device_set_keyboard_focus(&seat->seat);
-	}
-
-	wl_signal_emit(&compositor->activate_signal, surface);
-}
-
-WL_EXPORT void
-notify_button(struct weston_seat *seat, uint32_t time, int32_t button,
-	      enum wl_pointer_button_state state)
-{
-	struct weston_compositor *compositor = seat->compositor;
-	struct wl_pointer *pointer = seat->seat.pointer;
-	struct weston_surface *focus =
-		(struct weston_surface *) pointer->focus;
-	uint32_t serial = wl_display_next_serial(compositor->wl_display);
-
-	if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-		if (compositor->ping_handler && focus)
-			compositor->ping_handler(focus, serial);
-		weston_compositor_idle_inhibit(compositor);
-		if (pointer->button_count == 0) {
-			pointer->grab_button = button;
-			pointer->grab_time = time;
-			pointer->grab_x = pointer->x;
-			pointer->grab_y = pointer->y;
-		}
-		pointer->button_count++;
-	} else {
-		weston_compositor_idle_release(compositor);
-		pointer->button_count--;
-	}
-
-	weston_compositor_run_button_binding(compositor, seat, time, button,
-					     state);
-
-	pointer->grab->interface->button(pointer->grab, time, button, state);
-
-	if (pointer->button_count == 1)
-		pointer->grab_serial =
-			wl_display_get_serial(compositor->wl_display);
-}
-
-WL_EXPORT void
-notify_axis(struct weston_seat *seat, uint32_t time, uint32_t axis,
-	    wl_fixed_t value)
-{
-	struct weston_compositor *compositor = seat->compositor;
-	struct wl_pointer *pointer = seat->seat.pointer;
-	struct weston_surface *focus =
-		(struct weston_surface *) pointer->focus;
-	uint32_t serial = wl_display_next_serial(compositor->wl_display);
-
-	if (compositor->ping_handler && focus)
-		compositor->ping_handler(focus, serial);
-
-	weston_compositor_wake(compositor);
-
-	if (!value)
-		return;
-
-	if (weston_compositor_run_axis_binding(compositor, seat,
-						   time, axis, value))
-		return;
-
-	if (pointer->focus_resource)
-		wl_pointer_send_axis(pointer->focus_resource, time, axis,
-				     value);
-}
-
-WL_EXPORT void
-notify_modifiers(struct weston_seat *seat, uint32_t serial)
-{
-	struct wl_keyboard *keyboard = &seat->keyboard.keyboard;
-	struct wl_keyboard_grab *grab = keyboard->grab;
-	uint32_t mods_depressed, mods_latched, mods_locked, group;
-	uint32_t mods_lookup;
-	enum weston_led leds = 0;
-	int changed = 0;
-
-	/* Serialize and update our internal state, checking to see if it's
-	 * different to the previous state. */
-	mods_depressed = xkb_state_serialize_mods(seat->xkb_state.state,
-						  XKB_STATE_DEPRESSED);
-	mods_latched = xkb_state_serialize_mods(seat->xkb_state.state,
-						XKB_STATE_LATCHED);
-	mods_locked = xkb_state_serialize_mods(seat->xkb_state.state,
-					       XKB_STATE_LOCKED);
-	group = xkb_state_serialize_group(seat->xkb_state.state,
-					  XKB_STATE_EFFECTIVE);
-
-	if (mods_depressed != seat->seat.keyboard->modifiers.mods_depressed ||
-	    mods_latched != seat->seat.keyboard->modifiers.mods_latched ||
-	    mods_locked != seat->seat.keyboard->modifiers.mods_locked ||
-	    group != seat->seat.keyboard->modifiers.group)
-		changed = 1;
-
-	seat->seat.keyboard->modifiers.mods_depressed = mods_depressed;
-	seat->seat.keyboard->modifiers.mods_latched = mods_latched;
-	seat->seat.keyboard->modifiers.mods_locked = mods_locked;
-	seat->seat.keyboard->modifiers.group = group;
-
-	/* And update the modifier_state for bindings. */
-	mods_lookup = mods_depressed | mods_latched;
-	seat->modifier_state = 0;
-	if (mods_lookup & (1 << seat->xkb_info.ctrl_mod))
-		seat->modifier_state |= MODIFIER_CTRL;
-	if (mods_lookup & (1 << seat->xkb_info.alt_mod))
-		seat->modifier_state |= MODIFIER_ALT;
-	if (mods_lookup & (1 << seat->xkb_info.super_mod))
-		seat->modifier_state |= MODIFIER_SUPER;
-	if (mods_lookup & (1 << seat->xkb_info.shift_mod))
-		seat->modifier_state |= MODIFIER_SHIFT;
-
-	/* Finally, notify the compositor that LEDs have changed. */
-	if (xkb_state_led_index_is_active(seat->xkb_state.state,
-					  seat->xkb_info.num_led))
-		leds |= LED_NUM_LOCK;
-	if (xkb_state_led_index_is_active(seat->xkb_state.state,
-					  seat->xkb_info.caps_led))
-		leds |= LED_CAPS_LOCK;
-	if (xkb_state_led_index_is_active(seat->xkb_state.state,
-					  seat->xkb_info.scroll_led))
-		leds |= LED_SCROLL_LOCK;
-	if (leds != seat->xkb_state.leds && seat->led_update)
-		seat->led_update(seat, leds);
-	seat->xkb_state.leds = leds;
-
-	if (changed) {
-		grab->interface->modifiers(grab,
-					   serial,
-					   keyboard->modifiers.mods_depressed,
-					   keyboard->modifiers.mods_latched,
-					   keyboard->modifiers.mods_locked,
-					   keyboard->modifiers.group);
-	}
-}
-
-static void
-update_modifier_state(struct weston_seat *seat, uint32_t serial, uint32_t key,
-		      enum wl_keyboard_key_state state)
-{
-	enum xkb_key_direction direction;
-
-	if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
-		direction = XKB_KEY_DOWN;
-	else
-		direction = XKB_KEY_UP;
-
-	/* Offset the keycode by 8, as the evdev XKB rules reflect X's
-	 * broken keycode system, which starts at 8. */
-	xkb_state_update_key(seat->xkb_state.state, key + 8, direction);
-
-	notify_modifiers(seat, serial);
-}
-
-WL_EXPORT void
-notify_key(struct weston_seat *seat, uint32_t time, uint32_t key,
-	   enum wl_keyboard_key_state state,
-	   enum weston_key_state_update update_state)
-{
-	struct weston_compositor *compositor = seat->compositor;
-	struct weston_keyboard *keyboard = &seat->keyboard;
-	struct weston_surface *focus =
-		(struct weston_surface *) keyboard->keyboard.focus;
-	struct wl_keyboard_grab *grab = keyboard->keyboard.grab;
-	uint32_t serial = wl_display_next_serial(compositor->wl_display);
-	uint32_t *k, *end;
-
-	if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		if (compositor->ping_handler && focus)
-			compositor->ping_handler(focus, serial);
-
-		weston_compositor_idle_inhibit(compositor);
-		keyboard->keyboard.grab_key = key;
-		keyboard->keyboard.grab_time = time;
-	} else {
-		weston_compositor_idle_release(compositor);
-	}
-
-	end = keyboard->keyboard.keys.data + keyboard->keyboard.keys.size;
-	for (k = keyboard->keyboard.keys.data; k < end; k++) {
-		if (*k == key) {
-			/* Ignore server-generated repeats. */
-			if (state == WL_KEYBOARD_KEY_STATE_PRESSED)
-				return;
-			*k = *--end;
-		}
-	}
-	keyboard->keyboard.keys.size = (void *) end - keyboard->keyboard.keys.data;
-	if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-		k = wl_array_add(&keyboard->keyboard.keys, sizeof *k);
-		*k = key;
-	}
-
-	if (grab == &keyboard->keyboard.default_grab ||
-	    grab == &keyboard->input_method_grab) {
-		weston_compositor_run_key_binding(compositor, seat, time, key,
-						  state);
-		grab = keyboard->keyboard.grab;
-	}
-
-	grab->interface->key(grab, time, key, state);
-
-	if (update_state == STATE_UPDATE_AUTOMATIC) {
-		update_modifier_state(seat,
-				      wl_display_get_serial(compositor->wl_display),
-				      key,
-				      state);
-	}
-}
-
-WL_EXPORT void
-notify_pointer_focus(struct weston_seat *seat, struct weston_output *output,
-		     wl_fixed_t x, wl_fixed_t y)
-{
-	struct weston_compositor *compositor = seat->compositor;
-
-	if (output) {
-		move_pointer(seat, x, y);
-		compositor->focus = 1;
-	} else {
-		compositor->focus = 0;
-		/* FIXME: We should call wl_pointer_set_focus(seat,
-		 * NULL) here, but somehow that breaks re-entry... */
-	}
-}
-
-static void
-destroy_device_saved_kbd_focus(struct wl_listener *listener, void *data)
-{
-	struct weston_seat *ws;
-
-	ws = container_of(listener, struct weston_seat,
-			  saved_kbd_focus_listener);
-
-	ws->saved_kbd_focus = NULL;
-}
-
-WL_EXPORT void
-notify_keyboard_focus_in(struct weston_seat *seat, struct wl_array *keys,
-			 enum weston_key_state_update update_state)
-{
-	struct weston_compositor *compositor = seat->compositor;
-	struct wl_keyboard *keyboard = seat->seat.keyboard;
-	struct wl_surface *surface;
-	uint32_t *k, serial;
-
-	serial = wl_display_next_serial(compositor->wl_display);
-	wl_array_copy(&keyboard->keys, keys);
-	wl_array_for_each(k, &keyboard->keys) {
-		weston_compositor_idle_inhibit(compositor);
-		if (update_state == STATE_UPDATE_AUTOMATIC)
-			update_modifier_state(seat, serial, *k,
-					      WL_KEYBOARD_KEY_STATE_PRESSED);
-	}
-
-	/* Run key bindings after we've updated the state. */
-	wl_array_for_each(k, &keyboard->keys) {
-		weston_compositor_run_key_binding(compositor, seat, 0, *k,
-						  WL_KEYBOARD_KEY_STATE_PRESSED);
-	}
-
-	surface = seat->saved_kbd_focus;
-
-	if (surface) {
-		wl_list_remove(&seat->saved_kbd_focus_listener.link);
-		wl_keyboard_set_focus(keyboard, surface);
-		seat->saved_kbd_focus = NULL;
-	}
-}
-
-WL_EXPORT void
-notify_keyboard_focus_out(struct weston_seat *seat)
-{
-	struct weston_compositor *compositor = seat->compositor;
-	struct wl_keyboard *keyboard = seat->seat.keyboard;
-	uint32_t *k, serial;
-
-	serial = wl_display_next_serial(compositor->wl_display);
-	wl_array_for_each(k, &keyboard->keys) {
-		weston_compositor_idle_release(compositor);
-		update_modifier_state(seat, serial, *k,
-				      WL_KEYBOARD_KEY_STATE_RELEASED);
-	}
-
-	seat->modifier_state = 0;
-
-	if (keyboard->focus) {
-		seat->saved_kbd_focus = keyboard->focus;
-		seat->saved_kbd_focus_listener.notify =
-			destroy_device_saved_kbd_focus;
-		wl_signal_add(&keyboard->focus->resource.destroy_signal,
-			      &seat->saved_kbd_focus_listener);
-	}
-
-	wl_keyboard_set_focus(keyboard, NULL);
-	/* FIXME: We really need keyboard grab cancel here to
-	 * let the grab shut down properly.  As it is we leak
-	 * the grab data. */
-	wl_keyboard_end_grab(keyboard);
-}
-
-static void
-touch_set_focus(struct weston_seat *ws, struct wl_surface *surface)
-{
-	struct wl_seat *seat = &ws->seat;
-	struct wl_resource *resource;
-
-	if (seat->touch->focus == surface)
-		return;
-
-	if (seat->touch->focus_resource)
-		wl_list_remove(&seat->touch->focus_listener.link);
-	seat->touch->focus = NULL;
-	seat->touch->focus_resource = NULL;
-
-	if (surface) {
-		resource =
-			find_resource_for_client(&seat->touch->resource_list,
-						 surface->resource.client);
-		if (!resource) {
-			weston_log("couldn't find resource\n");
-			return;
-		}
-
-		seat->touch->focus = surface;
-		seat->touch->focus_resource = resource;
-		wl_signal_add(&resource->destroy_signal,
-			      &seat->touch->focus_listener);
-	}
-}
-
-/**
- * notify_touch - emulates button touches and notifies surfaces accordingly.
- *
- * It assumes always the correct cycle sequence until it gets here: touch_down
- * → touch_update → ... → touch_update → touch_end. The driver is responsible
- * for sending along such order.
- *
- */
-WL_EXPORT void
-notify_touch(struct weston_seat *seat, uint32_t time, int touch_id,
-             wl_fixed_t x, wl_fixed_t y, int touch_type)
-{
-	struct weston_compositor *ec = seat->compositor;
-	struct wl_touch *touch = seat->seat.touch;
-	struct wl_touch_grab *grab = touch->grab;
-	struct weston_surface *es;
-	wl_fixed_t sx, sy;
-
-	/* Update grab's global coordinates. */
-	touch->grab_x = x;
-	touch->grab_y = y;
-
-	switch (touch_type) {
-	case WL_TOUCH_DOWN:
-		weston_compositor_idle_inhibit(ec);
-
-		seat->num_tp++;
-
-		/* the first finger down picks the surface, and all further go
-		 * to that surface for the remainder of the touch session i.e.
-		 * until all touch points are up again. */
-		if (seat->num_tp == 1) {
-			es = weston_compositor_pick_surface(ec, x, y, &sx, &sy);
-			touch_set_focus(seat, &es->surface);
-		} else if (touch->focus) {
-			es = (struct weston_surface *) touch->focus;
-			weston_surface_from_global_fixed(es, x, y, &sx, &sy);
-		} else {
-			/* Unexpected condition: We have non-initial touch but
-			 * there is no focused surface.
-			 */
-			weston_log("touch event received with %d points down"
-				   "but no surface focused\n", seat->num_tp);
-			return;
-		}
-
-		grab->interface->down(grab, time, touch_id, sx, sy);
-		break;
-	case WL_TOUCH_MOTION:
-		es = (struct weston_surface *) touch->focus;
-		if (!es)
-			break;
-
-		weston_surface_from_global_fixed(es, x, y, &sx, &sy);
-		grab->interface->motion(grab, time, touch_id, sx, sy);
-		break;
-	case WL_TOUCH_UP:
-		weston_compositor_idle_release(ec);
-		seat->num_tp--;
-
-		grab->interface->up(grab, time, touch_id);
-		if (seat->num_tp == 0)
-			touch_set_focus(seat, NULL);
-		break;
-	}
-}
-
-static void
-pointer_handle_sprite_destroy(struct wl_listener *listener, void *data)
-{
-	struct weston_seat *seat = container_of(listener, struct weston_seat,
-						sprite_destroy_listener);
-
-	seat->sprite = NULL;
-}
-
-static void
-pointer_cursor_surface_configure(struct weston_surface *es,
-				 int32_t dx, int32_t dy, int32_t width, int32_t height)
-{
-	struct weston_seat *seat = es->configure_private;
-	int x, y;
-
-	if (width == 0)
-		return;
-
-	assert(es == seat->sprite);
-
-	seat->hotspot_x -= dx;
-	seat->hotspot_y -= dy;
-
-	x = wl_fixed_to_int(seat->seat.pointer->x) - seat->hotspot_x;
-	y = wl_fixed_to_int(seat->seat.pointer->y) - seat->hotspot_y;
-
-	weston_surface_configure(seat->sprite, x, y,
-				 width, height);
-
-	empty_region(&es->pending.input);
-
-	if (!weston_surface_is_mapped(es)) {
-		wl_list_insert(&es->compositor->cursor_layer.surface_list,
-			       &es->layer_link);
-		weston_surface_update_transform(es);
-	}
-}
-
-static void
-pointer_unmap_sprite(struct weston_seat *seat)
-{
-	if (weston_surface_is_mapped(seat->sprite))
-		weston_surface_unmap(seat->sprite);
-
-	wl_list_remove(&seat->sprite_destroy_listener.link);
-	seat->sprite->configure = NULL;
-	seat->sprite->configure_private = NULL;
-	seat->sprite = NULL;
-}
-
-static void
-pointer_set_cursor(struct wl_client *client, struct wl_resource *resource,
-		   uint32_t serial, struct wl_resource *surface_resource,
-		   int32_t x, int32_t y)
-{
-	struct weston_seat *seat = resource->data;
-	struct weston_surface *surface = NULL;
-
-	if (surface_resource)
-		surface = surface_resource->data;
-
-	if (seat->seat.pointer->focus == NULL)
-		return;
-	if (seat->seat.pointer->focus->resource.client != client)
-		return;
-	if (seat->seat.pointer->focus_serial - serial > UINT32_MAX / 2)
-		return;
-
-	if (surface && surface != seat->sprite) {
-		if (surface->configure) {
-			wl_resource_post_error(&surface->surface.resource,
-					       WL_DISPLAY_ERROR_INVALID_OBJECT,
-					       "surface->configure already "
-					       "set");
-			return;
-		}
-	}
-
-	if (seat->sprite)
-		pointer_unmap_sprite(seat);
-
-	if (!surface)
-		return;
-
-	wl_signal_add(&surface->surface.resource.destroy_signal,
-		      &seat->sprite_destroy_listener);
-
-	surface->configure = pointer_cursor_surface_configure;
-	surface->configure_private = seat;
-	seat->sprite = surface;
-	seat->hotspot_x = x;
-	seat->hotspot_y = y;
-
-	if (surface->buffer_ref.buffer)
-		pointer_cursor_surface_configure(surface, 0, 0, weston_surface_buffer_width(surface),
-								weston_surface_buffer_height(surface));
-}
-
-static const struct wl_pointer_interface pointer_interface = {
-	pointer_set_cursor
-};
-
-static void
-handle_drag_surface_destroy(struct wl_listener *listener, void *data)
-{
-	struct weston_seat *seat;
-
-	seat = container_of(listener, struct weston_seat,
-			    drag_surface_destroy_listener);
-
-	seat->drag_surface = NULL;
-}
-
 static void unbind_resource(struct wl_resource *resource)
 {
-	wl_list_remove(&resource->link);
-	free(resource);
-}
-
-static void
-seat_get_pointer(struct wl_client *client, struct wl_resource *resource,
-		 uint32_t id)
-{
-	struct weston_seat *seat = resource->data;
-	struct wl_resource *cr;
-
-	if (!seat->seat.pointer)
-		return;
-
-        cr = wl_client_add_object(client, &wl_pointer_interface,
-				  &pointer_interface, id, seat);
-	wl_list_insert(&seat->seat.pointer->resource_list, &cr->link);
-	cr->destroy = unbind_resource;
-
-	if (seat->seat.pointer->focus &&
-	    seat->seat.pointer->focus->resource.client == client) {
-		struct weston_surface *surface;
-		wl_fixed_t sx, sy;
-
-		surface = (struct weston_surface *) seat->seat.pointer->focus;
-		weston_surface_from_global_fixed(surface,
-						 seat->seat.pointer->x,
-						 seat->seat.pointer->y,
-						 &sx,
-						 &sy);
-		wl_pointer_set_focus(seat->seat.pointer,
-				     seat->seat.pointer->focus,
-				     sx,
-				     sy);
-	}
-}
-
-static void
-seat_get_keyboard(struct wl_client *client, struct wl_resource *resource,
-		  uint32_t id)
-{
-	struct weston_seat *seat = resource->data;
-	struct wl_resource *cr;
-
-	if (!seat->seat.keyboard)
-		return;
-
-        cr = wl_client_add_object(client, &wl_keyboard_interface, NULL, id,
-				  seat);
-	wl_list_insert(&seat->seat.keyboard->resource_list, &cr->link);
-	cr->destroy = unbind_resource;
-
-	wl_keyboard_send_keymap(cr, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
-				seat->xkb_info.keymap_fd,
-				seat->xkb_info.keymap_size);
-
-	if (seat->seat.keyboard->focus &&
-	    seat->seat.keyboard->focus->resource.client == client) {
-		wl_keyboard_set_focus(seat->seat.keyboard,
-				      seat->seat.keyboard->focus);
-		wl_data_device_set_keyboard_focus(&seat->seat);
-	}
-}
-
-static void
-seat_get_touch(struct wl_client *client, struct wl_resource *resource,
-	       uint32_t id)
-{
-	struct weston_seat *seat = resource->data;
-	struct wl_resource *cr;
-
-	if (!seat->seat.touch)
-		return;
-
-        cr = wl_client_add_object(client, &wl_touch_interface, NULL, id, seat);
-	wl_list_insert(&seat->seat.touch->resource_list, &cr->link);
-	cr->destroy = unbind_resource;
-}
-
-static const struct wl_seat_interface seat_interface = {
-	seat_get_pointer,
-	seat_get_keyboard,
-	seat_get_touch,
-};
-
-static void
-bind_seat(struct wl_client *client, void *data, uint32_t version, uint32_t id)
-{
-	struct wl_seat *seat = data;
-	struct wl_resource *resource;
-	enum wl_seat_capability caps = 0;
-
-	resource = wl_client_add_object(client, &wl_seat_interface,
-					&seat_interface, id, data);
-	wl_list_insert(&seat->base_resource_list, &resource->link);
-	resource->destroy = unbind_resource;
-
-	if (seat->pointer)
-		caps |= WL_SEAT_CAPABILITY_POINTER;
-	if (seat->keyboard)
-		caps |= WL_SEAT_CAPABILITY_KEYBOARD;
-	if (seat->touch)
-		caps |= WL_SEAT_CAPABILITY_TOUCH;
-
-	wl_seat_send_capabilities(resource, caps);
-}
-
-static void
-device_handle_new_drag_icon(struct wl_listener *listener, void *data)
-{
-	struct weston_seat *seat;
-
-	seat = container_of(listener, struct weston_seat,
-			    new_drag_icon_listener);
-
-	weston_seat_update_drag_surface(seat, 0, 0);
-}
-
-static int
-weston_compositor_xkb_init(struct weston_compositor *ec,
-			   struct xkb_rule_names *names)
-{
-	if (ec->xkb_context == NULL) {
-		ec->xkb_context = xkb_context_new(0);
-		if (ec->xkb_context == NULL) {
-			weston_log("failed to create XKB context\n");
-			return -1;
-		}
-	}
-
-	if (names)
-		ec->xkb_names = *names;
-	if (!ec->xkb_names.rules)
-		ec->xkb_names.rules = strdup("evdev");
-	if (!ec->xkb_names.model)
-		ec->xkb_names.model = strdup("pc105");
-	if (!ec->xkb_names.layout)
-		ec->xkb_names.layout = strdup("us");
-
-	return 0;
-}
-
-static void xkb_info_destroy(struct weston_xkb_info *xkb_info)
-{
-	if (xkb_info->keymap)
-		xkb_map_unref(xkb_info->keymap);
-
-	if (xkb_info->keymap_area)
-		munmap(xkb_info->keymap_area, xkb_info->keymap_size);
-	if (xkb_info->keymap_fd >= 0)
-		close(xkb_info->keymap_fd);
-}
-
-static void weston_compositor_xkb_destroy(struct weston_compositor *ec)
-{
-	free((char *) ec->xkb_names.rules);
-	free((char *) ec->xkb_names.model);
-	free((char *) ec->xkb_names.layout);
-	free((char *) ec->xkb_names.variant);
-	free((char *) ec->xkb_names.options);
-
-	xkb_info_destroy(&ec->xkb_info);
-	xkb_context_unref(ec->xkb_context);
-}
-
-static int
-weston_xkb_info_new_keymap(struct weston_xkb_info *xkb_info)
-{
-	char *keymap_str;
-
-	xkb_info->shift_mod = xkb_map_mod_get_index(xkb_info->keymap,
-						    XKB_MOD_NAME_SHIFT);
-	xkb_info->caps_mod = xkb_map_mod_get_index(xkb_info->keymap,
-						   XKB_MOD_NAME_CAPS);
-	xkb_info->ctrl_mod = xkb_map_mod_get_index(xkb_info->keymap,
-						   XKB_MOD_NAME_CTRL);
-	xkb_info->alt_mod = xkb_map_mod_get_index(xkb_info->keymap,
-						  XKB_MOD_NAME_ALT);
-	xkb_info->mod2_mod = xkb_map_mod_get_index(xkb_info->keymap, "Mod2");
-	xkb_info->mod3_mod = xkb_map_mod_get_index(xkb_info->keymap, "Mod3");
-	xkb_info->super_mod = xkb_map_mod_get_index(xkb_info->keymap,
-						    XKB_MOD_NAME_LOGO);
-	xkb_info->mod5_mod = xkb_map_mod_get_index(xkb_info->keymap, "Mod5");
-
-	xkb_info->num_led = xkb_map_led_get_index(xkb_info->keymap,
-						  XKB_LED_NAME_NUM);
-	xkb_info->caps_led = xkb_map_led_get_index(xkb_info->keymap,
-						   XKB_LED_NAME_CAPS);
-	xkb_info->scroll_led = xkb_map_led_get_index(xkb_info->keymap,
-						     XKB_LED_NAME_SCROLL);
-
-	keymap_str = xkb_map_get_as_string(xkb_info->keymap);
-	if (keymap_str == NULL) {
-		weston_log("failed to get string version of keymap\n");
-		return -1;
-	}
-	xkb_info->keymap_size = strlen(keymap_str) + 1;
-
-	xkb_info->keymap_fd = os_create_anonymous_file(xkb_info->keymap_size);
-	if (xkb_info->keymap_fd < 0) {
-		weston_log("creating a keymap file for %lu bytes failed: %m\n",
-			(unsigned long) xkb_info->keymap_size);
-		goto err_keymap_str;
-	}
-
-	xkb_info->keymap_area = mmap(NULL, xkb_info->keymap_size,
-				     PROT_READ | PROT_WRITE,
-				     MAP_SHARED, xkb_info->keymap_fd, 0);
-	if (xkb_info->keymap_area == MAP_FAILED) {
-		weston_log("failed to mmap() %lu bytes\n",
-			(unsigned long) xkb_info->keymap_size);
-		goto err_dev_zero;
-	}
-	strcpy(xkb_info->keymap_area, keymap_str);
-	free(keymap_str);
-
-	return 0;
-
-err_dev_zero:
-	close(xkb_info->keymap_fd);
-	xkb_info->keymap_fd = -1;
-err_keymap_str:
-	free(keymap_str);
-	return -1;
-}
-
-static int
-weston_compositor_build_global_keymap(struct weston_compositor *ec)
-{
-	if (ec->xkb_info.keymap != NULL)
-		return 0;
-
-	ec->xkb_info.keymap = xkb_map_new_from_names(ec->xkb_context,
-						     &ec->xkb_names,
-						     0);
-	if (ec->xkb_info.keymap == NULL) {
-		weston_log("failed to compile global XKB keymap\n");
-		weston_log("  tried rules %s, model %s, layout %s, variant %s, "
-			"options %s\n",
-			ec->xkb_names.rules, ec->xkb_names.model,
-			ec->xkb_names.layout, ec->xkb_names.variant,
-			ec->xkb_names.options);
-		return -1;
-	}
-
-	if (weston_xkb_info_new_keymap(&ec->xkb_info) < 0)
-		return -1;
-
-	return 0;
-}
-
-WL_EXPORT int
-weston_seat_init_keyboard(struct weston_seat *seat, struct xkb_keymap *keymap)
-{
-	if (seat->has_keyboard)
-		return 0;
-
-	if (keymap != NULL) {
-		seat->xkb_info.keymap = xkb_map_ref(keymap);
-		if (weston_xkb_info_new_keymap(&seat->xkb_info) < 0)
-			return -1;
-	} else {
-		if (weston_compositor_build_global_keymap(seat->compositor) < 0)
-			return -1;
-		seat->xkb_info = seat->compositor->xkb_info;
-		seat->xkb_info.keymap = xkb_map_ref(seat->xkb_info.keymap);
-	}
-
-	seat->xkb_state.state = xkb_state_new(seat->xkb_info.keymap);
-	if (seat->xkb_state.state == NULL) {
-		weston_log("failed to initialise XKB state\n");
-		return -1;
-	}
-
-	seat->xkb_state.leds = 0;
-
-	wl_keyboard_init(&seat->keyboard.keyboard);
-	wl_seat_set_keyboard(&seat->seat, &seat->keyboard.keyboard);
-
-	seat->has_keyboard = 1;
-
-	return 0;
-}
-
-WL_EXPORT void
-weston_seat_init_pointer(struct weston_seat *seat)
-{
-	if (seat->has_pointer)
-		return;
-
-	wl_pointer_init(&seat->pointer);
-	wl_seat_set_pointer(&seat->seat, &seat->pointer);
-
-	seat->has_pointer = 1;
-}
-
-WL_EXPORT void
-weston_seat_init_touch(struct weston_seat *seat)
-{
-	if (seat->has_touch)
-		return;
-
-	wl_touch_init(&seat->touch);
-	wl_seat_set_touch(&seat->seat, &seat->touch);
-
-	seat->has_touch = 1;
-}
-
-WL_EXPORT void
-weston_seat_init(struct weston_seat *seat, struct weston_compositor *ec)
-{
-	wl_seat_init(&seat->seat);
-	seat->has_pointer = 0;
-	seat->has_keyboard = 0;
-	seat->has_touch = 0;
-
-	wl_display_add_global(ec->wl_display, &wl_seat_interface, seat,
-			      bind_seat);
-
-	seat->sprite = NULL;
-	seat->sprite_destroy_listener.notify = pointer_handle_sprite_destroy;
-
-	seat->compositor = ec;
-	seat->hotspot_x = 16;
-	seat->hotspot_y = 16;
-	seat->modifier_state = 0;
-	seat->num_tp = 0;
-
-	seat->drag_surface_destroy_listener.notify =
-		handle_drag_surface_destroy;
-
-	wl_list_insert(ec->seat_list.prev, &seat->link);
-
-	seat->new_drag_icon_listener.notify = device_handle_new_drag_icon;
-	wl_signal_add(&seat->seat.drag_icon_signal,
-		      &seat->new_drag_icon_listener);
-
-	clipboard_create(seat);
-
-	wl_signal_init(&seat->destroy_signal);
-	wl_signal_emit(&ec->seat_created_signal, seat);
-}
-
-WL_EXPORT void
-weston_seat_release(struct weston_seat *seat)
-{
-	wl_list_remove(&seat->link);
-	/* The global object is destroyed at wl_display_destroy() time. */
-
-	if (seat->sprite)
-		pointer_unmap_sprite(seat);
-
-	if (seat->xkb_state.state != NULL)
-		xkb_state_unref(seat->xkb_state.state);
-	xkb_info_destroy(&seat->xkb_info);
-
-	wl_seat_release(&seat->seat);
-	wl_signal_emit(&seat->destroy_signal, seat);
-}
-
-static void
-drag_surface_configure(struct weston_surface *es, int32_t sx, int32_t sy, int32_t width, int32_t height)
-{
-	empty_region(&es->pending.input);
-
-	weston_surface_configure(es,
-				 es->geometry.x + sx, es->geometry.y + sy,
-				 width, height);
-}
-
-static int
-device_setup_new_drag_surface(struct weston_seat *ws,
-			      struct weston_surface *surface)
-{
-	struct wl_seat *seat = &ws->seat;
-
-	if (surface->configure) {
-		wl_resource_post_error(&surface->surface.resource,
-				       WL_DISPLAY_ERROR_INVALID_OBJECT,
-				       "surface->configure already set");
-		return 0;
-	}
-
-	ws->drag_surface = surface;
-
-	weston_surface_set_position(ws->drag_surface,
-				    wl_fixed_to_double(seat->pointer->x),
-				    wl_fixed_to_double(seat->pointer->y));
-
-	surface->configure = drag_surface_configure;
-
-	wl_signal_add(&surface->surface.resource.destroy_signal,
-		       &ws->drag_surface_destroy_listener);
-
-	return 1;
-}
-
-static void
-device_release_drag_surface(struct weston_seat *seat)
-{
-	if (weston_surface_is_mapped(seat->drag_surface))
-		weston_surface_unmap(seat->drag_surface);
-
-	seat->drag_surface->configure = NULL;
-	empty_region(&seat->drag_surface->pending.input);
-	wl_list_remove(&seat->drag_surface_destroy_listener.link);
-	seat->drag_surface = NULL;
-}
-
-static void
-device_map_drag_surface(struct weston_seat *seat)
-{
-	struct wl_list *list;
-
-	if (weston_surface_is_mapped(seat->drag_surface) ||
-	    !seat->drag_surface->buffer_ref.buffer)
-		return;
-
-	if (seat->sprite && weston_surface_is_mapped(seat->sprite))
-		list = &seat->sprite->layer_link;
-	else
-		list = &seat->compositor->cursor_layer.surface_list;
-
-	wl_list_insert(list, &seat->drag_surface->layer_link);
-	weston_surface_update_transform(seat->drag_surface);
-	empty_region(&seat->drag_surface->input);
-}
-
-static  void
-weston_seat_update_drag_surface(struct weston_seat *seat,
-				int dx, int dy)
-{
-	int surface_changed = 0;
-
-	if (!seat->drag_surface && !seat->seat.drag_surface)
-		return;
-
-	if (seat->drag_surface && seat->seat.drag_surface &&
-	    (&seat->drag_surface->surface.resource !=
-	     &seat->seat.drag_surface->resource))
-		/* between calls to this funcion we got a new drag_surface */
-		surface_changed = 1;
-
-	if (!seat->seat.drag_surface || surface_changed) {
-		device_release_drag_surface(seat);
-		if (!surface_changed)
-			return;
-	}
-
-	if (!seat->drag_surface || surface_changed) {
-		struct weston_surface *surface = (struct weston_surface *)
-			seat->seat.drag_surface;
-		if (!device_setup_new_drag_surface(seat, surface))
-			return;
-	}
-
-	/* the client may not have attached a buffer to the drag surface
-	 * when we setup it up, so check if map is needed on every update */
-	device_map_drag_surface(seat);
-
-	if (!dx && !dy)
-		return;
-
-	weston_surface_set_position(seat->drag_surface,
-				    seat->drag_surface->geometry.x + wl_fixed_to_double(dx),
-				    seat->drag_surface->geometry.y + wl_fixed_to_double(dy));
-}
-
-WL_EXPORT void
-weston_compositor_update_drag_surfaces(struct weston_compositor *compositor)
-{
-	struct weston_seat *seat;
-
-	wl_list_for_each(seat, &compositor->seat_list, link)
-		weston_seat_update_drag_surface(seat, 0, 0);
+	wl_list_remove(wl_resource_get_link(resource));
 }
 
 static void
@@ -2877,11 +2538,11 @@ bind_output(struct wl_client *client,
 	struct weston_mode *mode;
 	struct wl_resource *resource;
 
-	resource = wl_client_add_object(client,
-					&wl_output_interface, NULL, id, data);
+	resource = wl_resource_create(client, &wl_output_interface,
+				      MIN(version, 2), id);
 
-	wl_list_insert(&output->resource_list, &resource->link);
-	resource->destroy = unbind_resource;
+	wl_list_insert(&output->resource_list, wl_resource_get_link(resource));
+	wl_resource_set_implementation(resource, NULL, data, unbind_resource);
 
 	wl_output_send_geometry(resource,
 				output->x,
@@ -2891,6 +2552,9 @@ bind_output(struct wl_client *client,
 				output->subpixel,
 				output->make, output->model,
 				output->transform);
+	if (version >= 2)
+		wl_output_send_scale(resource,
+				     output->scale);
 
 	wl_list_for_each (mode, &output->mode_list, link) {
 		wl_output_send_mode(resource,
@@ -2899,18 +2563,22 @@ bind_output(struct wl_client *client,
 				    mode->height,
 				    mode->refresh);
 	}
+
+	if (version >= 2)
+		wl_output_send_done(resource);
 }
 
 WL_EXPORT void
 weston_output_destroy(struct weston_output *output)
 {
-	struct weston_compositor *c = output->compositor;
+	wl_signal_emit(&output->destroy_signal, output);
 
+	free(output->name);
 	pixman_region32_fini(&output->region);
 	pixman_region32_fini(&output->previous_damage);
 	output->compositor->output_id_pool &= ~(1 << output->id);
 
-	wl_display_remove_global(c->wl_display, output->global);
+	wl_global_destroy(output->global);
 }
 
 static void
@@ -3005,7 +2673,7 @@ weston_output_update_matrix(struct weston_output *output)
 }
 
 static void
-weston_output_transform_init(struct weston_output *output, uint32_t transform)
+weston_output_transform_scale_init(struct weston_output *output, uint32_t transform, uint32_t scale)
 {
 	output->transform = transform;
 
@@ -3028,6 +2696,10 @@ weston_output_transform_init(struct weston_output *output, uint32_t transform)
 	default:
 		break;
 	}
+
+        output->scale = scale;
+	output->width /= scale;
+	output->height /= scale;
 }
 
 WL_EXPORT void
@@ -3044,7 +2716,8 @@ weston_output_move(struct weston_output *output, int x, int y)
 
 WL_EXPORT void
 weston_output_init(struct weston_output *output, struct weston_compositor *c,
-		   int x, int y, int width, int height, uint32_t transform)
+		   int x, int y, int mm_width, int mm_height, uint32_t transform,
+		   int32_t scale)
 {
 	output->compositor = c;
 	output->x = x;
@@ -3053,17 +2726,19 @@ weston_output_init(struct weston_output *output, struct weston_compositor *c,
 	output->border.bottom = 0;
 	output->border.left = 0;
 	output->border.right = 0;
-	output->mm_width = width;
-	output->mm_height = height;
+	output->mm_width = mm_width;
+	output->mm_height = mm_height;
 	output->dirty = 1;
+	output->origin_scale = scale;
 
-	weston_output_transform_init(output, transform);
+	weston_output_transform_scale_init(output, transform, scale);
 	weston_output_init_zoom(output);
 
 	weston_output_move(output, x, y);
 	weston_output_damage(output);
 
 	wl_signal_init(&output->frame_signal);
+	wl_signal_init(&output->destroy_signal);
 	wl_list_init(&output->animation_list);
 	wl_list_init(&output->resource_list);
 
@@ -3071,8 +2746,9 @@ weston_output_init(struct weston_output *output, struct weston_compositor *c,
 	output->compositor->output_id_pool |= 1 << output->id;
 
 	output->global =
-		wl_display_add_global(c->wl_display, &wl_output_interface,
-				      output, bind_output);
+		wl_global_create(c->wl_display, &wl_output_interface, 2,
+				 output, bind_output);
+	wl_signal_emit(&c->output_created_signal, output);
 }
 
 static void
@@ -3080,9 +2756,13 @@ compositor_bind(struct wl_client *client,
 		void *data, uint32_t version, uint32_t id)
 {
 	struct weston_compositor *compositor = data;
+	struct wl_resource *resource;
 
-	wl_client_add_object(client, &wl_compositor_interface,
-			     &compositor_interface, id, compositor);
+	resource = wl_resource_create(client, &wl_compositor_interface,
+				      MIN(version, 3), id);
+	if (resource)
+		wl_resource_set_implementation(resource, &compositor_interface,
+					       compositor, NULL);
 }
 
 static void
@@ -3123,40 +2803,35 @@ WL_EXPORT int
 weston_compositor_init(struct weston_compositor *ec,
 		       struct wl_display *display,
 		       int *argc, char *argv[],
-		       const char *config_file)
+		       struct weston_config *config)
 {
 	struct wl_event_loop *loop;
 	struct xkb_rule_names xkb_names;
-        const struct config_key keyboard_config_keys[] = {
-		{ "keymap_rules", CONFIG_KEY_STRING, &xkb_names.rules },
-		{ "keymap_model", CONFIG_KEY_STRING, &xkb_names.model },
-		{ "keymap_layout", CONFIG_KEY_STRING, &xkb_names.layout },
-		{ "keymap_variant", CONFIG_KEY_STRING, &xkb_names.variant },
-		{ "keymap_options", CONFIG_KEY_STRING, &xkb_names.options },
-        };
-	const struct config_section cs[] = {
-                { "keyboard",
-                  keyboard_config_keys, ARRAY_LENGTH(keyboard_config_keys) },
-	};
+	struct weston_config_section *s;
 
-	memset(&xkb_names, 0, sizeof(xkb_names));
-	parse_config_file(config_file, cs, ARRAY_LENGTH(cs), ec);
-
+	ec->config = config;
 	ec->wl_display = display;
 	wl_signal_init(&ec->destroy_signal);
 	wl_signal_init(&ec->activate_signal);
+	wl_signal_init(&ec->transform_signal);
 	wl_signal_init(&ec->kill_signal);
 	wl_signal_init(&ec->idle_signal);
 	wl_signal_init(&ec->wake_signal);
 	wl_signal_init(&ec->show_input_panel_signal);
 	wl_signal_init(&ec->hide_input_panel_signal);
+	wl_signal_init(&ec->update_input_panel_signal);
 	wl_signal_init(&ec->seat_created_signal);
+	wl_signal_init(&ec->output_created_signal);
 	ec->launcher_sock = weston_environment_get_fd("WESTON_LAUNCHER_SOCK");
 
 	ec->output_id_pool = 0;
 
-	if (!wl_display_add_global(display, &wl_compositor_interface,
-				   ec, compositor_bind))
+	if (!wl_global_create(display, &wl_compositor_interface, 3,
+			      ec, compositor_bind))
+		return -1;
+
+	if (!wl_global_create(display, &wl_subcompositor_interface, 1,
+			      ec, bind_subcompositor))
 		return -1;
 
 	wl_list_init(&ec->surface_list);
@@ -3171,6 +2846,18 @@ weston_compositor_init(struct weston_compositor *ec,
 
 	weston_plane_init(&ec->primary_plane, 0, 0);
 	weston_compositor_stack_plane(ec, &ec->primary_plane, NULL);
+
+	s = weston_config_get_section(ec->config, "keyboard", NULL, NULL);
+	weston_config_section_get_string(s, "keymap_rules",
+					 (char **) &xkb_names.rules, NULL);
+	weston_config_section_get_string(s, "keymap_model",
+					 (char **) &xkb_names.model, NULL);
+	weston_config_section_get_string(s, "keymap_layout",
+					 (char **) &xkb_names.layout, NULL);
+	weston_config_section_get_string(s, "keymap_variant",
+					 (char **) &xkb_names.variant, NULL);
+	weston_config_section_get_string(s, "keymap_options",
+					 (char **) &xkb_names.options, NULL);
 
 	if (weston_compositor_xkb_init(ec, &xkb_names) < 0)
 		return -1;
@@ -3219,11 +2906,9 @@ weston_compositor_shutdown(struct weston_compositor *ec)
 
 	weston_plane_release(&ec->primary_plane);
 
-	wl_array_release(&ec->vertices);
-	wl_array_release(&ec->indices);
-	wl_array_release(&ec->vtxcnt);
-
 	wl_event_loop_destroy(ec->input_loop);
+
+	weston_config_destroy(ec->config);
 }
 
 WL_EXPORT void
@@ -3232,6 +2917,29 @@ weston_version(int *major, int *minor, int *micro)
 	*major = WESTON_VERSION_MAJOR;
 	*minor = WESTON_VERSION_MINOR;
 	*micro = WESTON_VERSION_MICRO;
+}
+
+static const struct {
+	uint32_t bit; /* enum weston_capability */
+	const char *desc;
+} capability_strings[] = {
+	{ WESTON_CAP_ROTATION_ANY, "arbitrary surface rotation:" },
+	{ WESTON_CAP_CAPTURE_YFLIP, "screen capture uses y-flip:" },
+};
+
+static void
+weston_compositor_log_capabilities(struct weston_compositor *compositor)
+{
+	unsigned i;
+	int yes;
+
+	weston_log("Compositor capabilities:\n");
+	for (i = 0; i < ARRAY_LENGTH(capability_strings); i++) {
+		yes = compositor->capabilities & capability_strings[i].bit;
+		weston_log_continue(STAMP_SPACE "%s %s\n",
+				    capability_strings[i].desc,
+				    yes ? "yes" : "no");
+	}
 }
 
 static int on_term_signal(int signal_number, void *data)
@@ -3380,12 +3088,12 @@ load_module(const char *name, const char *entrypoint)
 
 static int
 load_modules(struct weston_compositor *ec, const char *modules,
-	     int *argc, char *argv[], const char *config_file)
+	     int *argc, char *argv[])
 {
 	const char *p, *end;
 	char buffer[256];
 	int (*module_init)(struct weston_compositor *ec,
-			   int *argc, char *argv[], const char *config_file);
+			   int *argc, char *argv[]);
 
 	if (modules == NULL)
 		return 0;
@@ -3396,7 +3104,7 @@ load_modules(struct weston_compositor *ec, const char *modules,
 		snprintf(buffer, sizeof buffer, "%.*s", (int) (end - p), p);
 		module_init = load_module(buffer, "module_init");
 		if (module_init)
-			module_init(ec, argc, argv, config_file);
+			module_init(ec, argc, argv);
 		p = end;
 		while (*p == ',')
 			p++;
@@ -3498,6 +3206,31 @@ usage(int error_code)
 		"  --height=HEIGHT\tHeight of Wayland surface\n"
 		"  --display=DISPLAY\tWayland display to connect to\n\n");
 
+#if defined(BUILD_RPI_COMPOSITOR) && defined(HAVE_BCM_HOST)
+	fprintf(stderr,
+		"Options for rpi-backend.so:\n\n"
+		"  --tty=TTY\t\tThe tty to use\n"
+		"  --single-buffer\tUse single-buffered Dispmanx elements.\n"
+		"  --transform=TR\tThe output transformation, TR is one of:\n"
+		"\tnormal 90 180 270 flipped flipped-90 flipped-180 flipped-270\n"
+		"\n");
+#endif
+
+#if defined(BUILD_RDP_COMPOSITOR)
+    fprintf(stderr,
+       "Options for rdp-backend.so:\n\n"
+       "  --width=WIDTH\t\tWidth of desktop\n"
+       "  --height=HEIGHT\tHeight of desktop\n"
+       "  --extra-modes=MODES\t\n"
+       "  --env-socket=SOCKET\tUse that socket as peer connection\n"
+       "  --address=ADDR\tThe address to bind\n"
+       "  --port=PORT\tThe port to listen on\n"
+       "  --rdp4-key=FILE\tThe file containing the key for RDP4 encryption\n"
+       "  --rdp-tls-cert=FILE\tThe file containing the certificate for TLS encryption\n"
+       "  --rdp-tls-key=FILE\tThe file containing the private key for TLS encryption\n"
+       "\n");
+#endif
+
 	exit(error_code);
 }
 
@@ -3522,25 +3255,18 @@ int main(int argc, char *argv[])
 	struct wl_event_loop *loop;
 	struct weston_compositor
 		*(*backend_init)(struct wl_display *display,
-				 int *argc, char *argv[], const char *config_file);
-	int i;
+				 int *argc, char *argv[],
+				 struct weston_config *config);
+	int i, config_fd;
 	char *backend = NULL;
-	const char *modules = "desktop-shell.so", *option_modules = NULL;
+	char *modules, *option_modules = NULL;
 	char *log = NULL;
 	int32_t idle_time = 300;
 	int32_t help = 0;
 	char *socket_name = "wayland-0";
 	int32_t version = 0;
-	char *config_file;
-
-	const struct config_key core_config_keys[] = {
-		{ "modules", CONFIG_KEY_STRING, &modules },
-	};
-
-	const struct config_section cs[] = {
-		{ "core",
-		  core_config_keys, ARRAY_LENGTH(core_config_keys) },
-	};
+	struct weston_config *config;
+	struct weston_config_section *section;
 
 	const struct weston_option core_options[] = {
 		{ WESTON_OPTION_STRING, "backend", 'B', &backend },
@@ -3597,14 +3323,19 @@ int main(int argc, char *argv[])
 			backend = WESTON_NATIVE_BACKEND;
 	}
 
-	config_file = config_file_path("weston.ini");
-	parse_config_file(config_file, cs, ARRAY_LENGTH(cs), NULL);
+	config_fd = open_config_file("weston.ini");
+	config = weston_config_parse(config_fd);
+	close(config_fd);
+
+	section = weston_config_get_section(config, "core", NULL, NULL);
+	weston_config_section_get_string(section, "modules",
+					 &modules, "desktop-shell.so");
 
 	backend_init = load_module(backend, "backend_init");
 	if (!backend_init)
 		exit(EXIT_FAILURE);
 
-	ec = backend_init(display, &argc, argv, config_file);
+	ec = backend_init(display, &argc, argv, config);
 	if (ec == NULL) {
 		weston_log("fatal: failed to create compositor\n");
 		exit(EXIT_FAILURE);
@@ -3617,12 +3348,10 @@ int main(int argc, char *argv[])
 
 	setenv("WAYLAND_DISPLAY", socket_name, 1);
 
-	if (load_modules(ec, modules, &argc, argv, config_file) < 0)
+	if (load_modules(ec, modules, &argc, argv) < 0)
 		goto out;
-	if (load_modules(ec, option_modules, &argc, argv, config_file) < 0)
+	if (load_modules(ec, option_modules, &argc, argv) < 0)
 		goto out;
-
-	free(config_file);
 
 	for (i = 1; i < argc; i++)
 		weston_log("fatal: unhandled option: %s\n", argv[i]);
@@ -3630,6 +3359,8 @@ int main(int argc, char *argv[])
 		ret = EXIT_FAILURE;
 		goto out;
 	}
+
+	weston_compositor_log_capabilities(ec);
 
 	if (wl_display_add_socket(display, socket_name)) {
 		weston_log("fatal: failed to add socket: %m\n");

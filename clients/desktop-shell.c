@@ -49,6 +49,7 @@ extern char **environ; /* defined by libc */
 struct desktop {
 	struct display *display;
 	struct desktop_shell *shell;
+	uint32_t interface_version;
 	struct unlock_dialog *unlock_dialog;
 	struct task unlock_task;
 	struct wl_list outputs;
@@ -56,7 +57,12 @@ struct desktop {
 	struct window *grab_window;
 	struct widget *grab_widget;
 
+	struct weston_config *config;
+	int locking;
+
 	enum cursor_type grab_cursor;
+
+	int painted;
 };
 
 struct surface {
@@ -72,12 +78,19 @@ struct panel {
 	struct widget *widget;
 	struct wl_list launcher_list;
 	struct panel_clock *clock;
+	int painted;
+	uint32_t color;
 };
 
 struct background {
 	struct surface base;
 	struct window *window;
 	struct widget *widget;
+	int painted;
+
+	char *image;
+	int type;
+	uint32_t color;
 };
 
 struct output {
@@ -115,35 +128,8 @@ struct unlock_dialog {
 	struct desktop *desktop;
 };
 
-static char *key_background_image = DATADIR "/weston/pattern.png";
-static char *key_background_type = "tile";
-static uint32_t key_panel_color = 0xaa000000;
-static uint32_t key_background_color = 0xff002244;
-static char *key_launcher_icon;
-static char *key_launcher_path;
-static void launcher_section_done(void *data);
-static int key_locking = 1;
-
-static const struct config_key shell_config_keys[] = {
-	{ "background-image", CONFIG_KEY_STRING, &key_background_image },
-	{ "background-type", CONFIG_KEY_STRING, &key_background_type },
-	{ "panel-color", CONFIG_KEY_UNSIGNED_INTEGER, &key_panel_color },
-	{ "background-color", CONFIG_KEY_UNSIGNED_INTEGER, &key_background_color },
-	{ "locking", CONFIG_KEY_BOOLEAN, &key_locking },
-};
-
-static const struct config_key launcher_config_keys[] = {
-	{ "icon", CONFIG_KEY_STRING, &key_launcher_icon },
-	{ "path", CONFIG_KEY_STRING, &key_launcher_path },
-};
-
-static const struct config_section config_sections[] = {
-	{ "shell",
-	  shell_config_keys, ARRAY_LENGTH(shell_config_keys) },
-	{ "launcher",
-	  launcher_config_keys, ARRAY_LENGTH(launcher_config_keys),
-	  launcher_section_done }
-};
+static void
+panel_add_launchers(struct panel *panel, struct desktop *desktop);
 
 static void
 sigchild_handler(int s)
@@ -175,6 +161,38 @@ show_menu(struct panel *panel, struct input *input, uint32_t time)
 			 x - 10, y - 10, menu_func, entries, 4);
 }
 
+static int
+is_desktop_painted(struct desktop *desktop)
+{
+	struct output *output;
+
+	wl_list_for_each(output, &desktop->outputs, link) {
+		if (output->panel && !output->panel->painted)
+			return 0;
+		if (output->background && !output->background->painted)
+			return 0;
+	}
+
+	return 1;
+}
+
+static void
+check_desktop_ready(struct window *window)
+{
+	struct display *display;
+	struct desktop *desktop;
+
+	display = window_get_display(window);
+	desktop = display_get_user_data(display);
+
+	if (!desktop->painted && is_desktop_painted(desktop)) {
+		desktop->painted = 1;
+
+		if (desktop->interface_version >= 2)
+			desktop_shell_desktop_ready(desktop->shell);
+	}
+}
+
 static void
 panel_launcher_activate(struct panel_launcher *widget)
 {
@@ -201,12 +219,10 @@ static void
 panel_launcher_redraw_handler(struct widget *widget, void *data)
 {
 	struct panel_launcher *launcher = data;
-	cairo_surface_t *surface;
 	struct rectangle allocation;
 	cairo_t *cr;
 
-	surface = window_get_surface(launcher->panel->window);
-	cr = cairo_create(surface);
+	cr = widget_cairo_create(launcher->panel->widget);
 
 	widget_get_allocation(widget, &allocation);
 	if (launcher->pressed) {
@@ -255,14 +271,16 @@ panel_redraw_handler(struct widget *widget, void *data)
 	cairo_t *cr;
 	struct panel *panel = data;
 
-	surface = window_get_surface(panel->window);
-	cr = cairo_create(surface);
+	cr = widget_cairo_create(panel->widget);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	set_hex_color(cr, key_panel_color);
+	set_hex_color(cr, panel->color);
 	cairo_paint(cr);
 
 	cairo_destroy(cr);
+	surface = window_get_surface(panel->window);
 	cairo_surface_destroy(surface);
+	panel->painted = 1;
+	check_desktop_ready(panel->window);
 }
 
 static int
@@ -317,7 +335,6 @@ clock_func(struct task *task, uint32_t events)
 static void
 panel_clock_redraw_handler(struct widget *widget, void *data)
 {
-	cairo_surface_t *surface;
 	struct panel_clock *clock = data;
 	cairo_t *cr;
 	struct rectangle allocation;
@@ -335,8 +352,7 @@ panel_clock_redraw_handler(struct widget *widget, void *data)
 	if (allocation.width == 0)
 		return;
 
-	surface = window_get_surface(clock->panel->window);
-	cr = cairo_create(surface);
+	cr = widget_cairo_create(clock->panel->widget);
 	cairo_select_font_face(cr, "sans",
 			       CAIRO_FONT_SLANT_NORMAL,
 			       CAIRO_FONT_WEIGHT_NORMAL);
@@ -491,15 +507,16 @@ panel_destroy(struct panel *panel)
 }
 
 static struct panel *
-panel_create(struct display *display)
+panel_create(struct desktop *desktop)
 {
 	struct panel *panel;
+	struct weston_config_section *s;
 
 	panel = malloc(sizeof *panel);
 	memset(panel, 0, sizeof *panel);
 
 	panel->base.configure = panel_configure;
-	panel->window = window_create_custom(display);
+	panel->window = window_create_custom(desktop->display);
 	panel->widget = window_add_widget(panel->window, panel);
 	wl_list_init(&panel->launcher_list);
 
@@ -511,6 +528,12 @@ panel_create(struct display *display)
 	widget_set_button_handler(panel->widget, panel_button_handler);
 	
 	panel_add_clock(panel);
+
+	s = weston_config_get_section(desktop->config, "shell", NULL, NULL);
+	weston_config_section_get_uint(s, "panel-color",
+				       &panel->color, 0xaa000000);
+
+	panel_add_launchers(panel, desktop);
 
 	return panel;
 }
@@ -625,6 +648,7 @@ panel_add_launcher(struct panel *panel, const char *icon, const char *path)
 
 enum {
 	BACKGROUND_SCALE,
+	BACKGROUND_SCALE_CROP,
 	BACKGROUND_TILE
 };
 
@@ -636,52 +660,57 @@ background_draw(struct widget *widget, void *data)
 	cairo_pattern_t *pattern;
 	cairo_matrix_t matrix;
 	cairo_t *cr;
-	double sx, sy;
+	double im_w, im_h;
+	double sx, sy, s;
+	double tx, ty;
 	struct rectangle allocation;
-	int type = -1;
 	struct display *display;
 	struct wl_region *opaque;
 
 	surface = window_get_surface(background->window);
 
-	cr = cairo_create(surface);
+	cr = widget_cairo_create(background->widget);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_set_source_rgba(cr, 0.0, 0.0, 0.2, 1.0);
 	cairo_paint(cr);
 
 	widget_get_allocation(widget, &allocation);
 	image = NULL;
-	if (key_background_image)
-		image = load_cairo_surface(key_background_image);
+	if (background->image)
+		image = load_cairo_surface(background->image);
 
-	if (strcmp(key_background_type, "scale") == 0)
-		type = BACKGROUND_SCALE;
-	else if (strcmp(key_background_type, "tile") == 0)
-		type = BACKGROUND_TILE;
-	else
-		fprintf(stderr, "invalid background-type: %s\n",
-			key_background_type);
+	if (image && background->type != -1) {
+		im_w = cairo_image_surface_get_width(image);
+		im_h = cairo_image_surface_get_height(image);
+		sx = im_w / allocation.width;
+		sy = im_h / allocation.height;
 
-	if (image && type != -1) {
 		pattern = cairo_pattern_create_for_surface(image);
-		switch (type) {
+
+		switch (background->type) {
 		case BACKGROUND_SCALE:
-			sx = (double) cairo_image_surface_get_width(image) /
-				allocation.width;
-			sy = (double) cairo_image_surface_get_height(image) /
-				allocation.height;
 			cairo_matrix_init_scale(&matrix, sx, sy);
+			cairo_pattern_set_matrix(pattern, &matrix);
+			break;
+		case BACKGROUND_SCALE_CROP:
+			s = (sx < sy) ? sx : sy;
+			/* align center */
+			tx = (im_w - s * allocation.width) * 0.5;
+			ty = (im_h - s * allocation.height) * 0.5;
+			cairo_matrix_init_translate(&matrix, tx, ty);
+			cairo_matrix_scale(&matrix, s, s);
 			cairo_pattern_set_matrix(pattern, &matrix);
 			break;
 		case BACKGROUND_TILE:
 			cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
 			break;
 		}
+
 		cairo_set_source(cr, pattern);
 		cairo_pattern_destroy (pattern);
 		cairo_surface_destroy(image);
 	} else {
-		set_hex_color(cr, key_background_color);
+		set_hex_color(cr, background->color);
 	}
 
 	cairo_paint(cr);
@@ -694,6 +723,9 @@ background_draw(struct widget *widget, void *data)
 		      allocation.width, allocation.height);
 	wl_surface_set_opaque_region(window_get_wl_surface(background->window), opaque);
 	wl_region_destroy(opaque);
+
+	background->painted = 1;
+	check_desktop_ready(background->window);
 }
 
 static void
@@ -713,13 +745,12 @@ unlock_dialog_redraw_handler(struct widget *widget, void *data)
 {
 	struct unlock_dialog *dialog = data;
 	struct rectangle allocation;
-	cairo_t *cr;
 	cairo_surface_t *surface;
+	cairo_t *cr;
 	cairo_pattern_t *pat;
 	double cx, cy, r, f;
 
-	surface = window_get_surface(dialog->window);
-	cr = cairo_create(surface);
+	cr = widget_cairo_create(widget);
 
 	widget_get_allocation(dialog->widget, &allocation);
 	cairo_rectangle(cr, allocation.x, allocation.y,
@@ -752,6 +783,7 @@ unlock_dialog_redraw_handler(struct widget *widget, void *data)
 
 	cairo_destroy(cr);
 
+	surface = window_get_surface(dialog->window);
 	cairo_surface_destroy(surface);
 }
 
@@ -876,7 +908,7 @@ desktop_shell_prepare_lock_surface(void *data,
 {
 	struct desktop *desktop = data;
 
-	if (!key_locking) {
+	if (!desktop->locking) {
 		desktop_shell_unlock(desktop->shell);
 		return;
 	}
@@ -946,6 +978,7 @@ background_destroy(struct background *background)
 	widget_destroy(background->widget);
 	window_destroy(background->window);
 
+	free(background->image);
 	free(background);
 }
 
@@ -953,6 +986,8 @@ static struct background *
 background_create(struct desktop *desktop)
 {
 	struct background *background;
+	struct weston_config_section *s;
+	char *type;
 
 	background = malloc(sizeof *background);
 	memset(background, 0, sizeof *background);
@@ -962,6 +997,29 @@ background_create(struct desktop *desktop)
 	background->widget = window_add_widget(background->window, background);
 	window_set_user_data(background->window, background);
 	widget_set_redraw_handler(background->widget, background_draw);
+
+	s = weston_config_get_section(desktop->config, "shell", NULL, NULL);
+	weston_config_section_get_string(s, "background-image",
+					 &background->image,
+					 DATADIR "/weston/pattern.png");
+	weston_config_section_get_uint(s, "background-color",
+				       &background->color, 0xff002244);
+
+	weston_config_section_get_string(s, "background-type",
+					 &type, "tile");
+	if (strcmp(type, "scale") == 0) {
+		background->type = BACKGROUND_SCALE;
+	} else if (strcmp(type, "scale-crop") == 0) {
+		background->type = BACKGROUND_SCALE_CROP;
+	} else if (strcmp(type, "tile") == 0) {
+		background->type = BACKGROUND_TILE;
+	} else {
+		background->type = -1;
+		fprintf(stderr, "invalid background-type: %s\n",
+			type);
+	}
+
+	free(type);
 
 	return background;
 }
@@ -1025,6 +1083,73 @@ desktop_destroy_outputs(struct desktop *desktop)
 }
 
 static void
+output_handle_geometry(void *data,
+                       struct wl_output *wl_output,
+                       int x, int y,
+                       int physical_width,
+                       int physical_height,
+                       int subpixel,
+                       const char *make,
+                       const char *model,
+                       int transform)
+{
+	struct output *output = data;
+
+	window_set_buffer_transform(output->panel->window, transform);
+	window_set_buffer_transform(output->background->window, transform);
+}
+
+static void
+output_handle_mode(void *data,
+		   struct wl_output *wl_output,
+		   uint32_t flags,
+		   int width,
+		   int height,
+		   int refresh)
+{
+}
+
+static void
+output_handle_done(void *data,
+                   struct wl_output *wl_output)
+{
+}
+
+static void
+output_handle_scale(void *data,
+                    struct wl_output *wl_output,
+                    int32_t scale)
+{
+	struct output *output = data;
+
+	window_set_buffer_scale(output->panel->window, scale);
+	window_set_buffer_scale(output->background->window, scale);
+}
+
+static const struct wl_output_listener output_listener = {
+	output_handle_geometry,
+	output_handle_mode,
+	output_handle_done,
+	output_handle_scale
+};
+
+static void
+output_init(struct output *output, struct desktop *desktop)
+{
+	struct wl_surface *surface;
+
+	output->panel = panel_create(desktop);
+	surface = window_get_wl_surface(output->panel->window);
+	desktop_shell_set_panel(desktop->shell,
+				output->output, surface);
+
+	output->background = background_create(desktop);
+	surface = window_get_wl_surface(output->background->window);
+	desktop_shell_set_background(desktop->shell,
+				     output->output, surface);
+}
+
+static void
 create_output(struct desktop *desktop, uint32_t id)
 {
 	struct output *output;
@@ -1034,9 +1159,16 @@ create_output(struct desktop *desktop, uint32_t id)
 		return;
 
 	output->output =
-		display_bind(desktop->display, id, &wl_output_interface, 1);
+		display_bind(desktop->display, id, &wl_output_interface, 2);
+
+	wl_output_add_listener(output->output, &output_listener, output);
 
 	wl_list_insert(&desktop->outputs, &output->link);
+
+	/* On start up we may process an output global before the shell global
+	 * in which case we can't create the panel and background just yet */
+	if (desktop->shell)
+		output_init(output, desktop);
 }
 
 static void
@@ -1046,8 +1178,10 @@ global_handler(struct display *display, uint32_t id,
 	struct desktop *desktop = data;
 
 	if (!strcmp(interface, "desktop_shell")) {
+		desktop->interface_version = (version < 2) ? version : 2;
 		desktop->shell = display_bind(desktop->display,
-					      id, &desktop_shell_interface, 1);
+					      id, &desktop_shell_interface,
+					      desktop->interface_version);
 		desktop_shell_add_listener(desktop->shell, &listener, desktop);
 	} else if (!strcmp(interface, "wl_output")) {
 		create_output(desktop, id);
@@ -1055,47 +1189,59 @@ global_handler(struct display *display, uint32_t id,
 }
 
 static void
-launcher_section_done(void *data)
+panel_add_launchers(struct panel *panel, struct desktop *desktop)
 {
-	struct desktop *desktop = data;
-	struct output *output;
+	struct weston_config_section *s;
+	char *icon, *path;
+	const char *name;
+	int count;
 
-	if (key_launcher_icon == NULL || key_launcher_path == NULL) {
-		fprintf(stderr, "invalid launcher section\n");
-		return;
+	count = 0;
+	s = NULL;
+	while (weston_config_next_section(desktop->config, &s, &name)) {
+		if (strcmp(name, "launcher") != 0)
+			continue;
+
+		weston_config_section_get_string(s, "icon", &icon, NULL);
+		weston_config_section_get_string(s, "path", &path, NULL);
+
+		if (icon != NULL && path != NULL) {
+			panel_add_launcher(panel, icon, path);
+		} else {
+			fprintf(stderr, "invalid launcher section\n");
+			continue;
+		}
+
+		free(icon);
+		free(path);
+
+		count++;
 	}
 
-	wl_list_for_each(output, &desktop->outputs, link) {
-		panel_add_launcher(output->panel,
-				   key_launcher_icon, key_launcher_path);
-	}
-
-	free(key_launcher_icon);
-	key_launcher_icon = NULL;
-	free(key_launcher_path);
-	key_launcher_path = NULL;
-}
-
-static void
-add_default_launcher(struct desktop *desktop)
-{
-	struct output *output;
-
-	wl_list_for_each(output, &desktop->outputs, link)
-		panel_add_launcher(output->panel,
+	if (count == 0) {
+		/* add default launcher */
+		panel_add_launcher(panel,
 				   DATADIR "/weston/terminal.png",
 				   BINDIR "/weston-terminal");
+	}
 }
 
 int main(int argc, char *argv[])
 {
 	struct desktop desktop = { 0 };
-	char *config_file;
+	int config_fd;
 	struct output *output;
-	int ret;
+	struct weston_config_section *s;
 
 	desktop.unlock_task.run = unlock_dialog_finish;
 	wl_list_init(&desktop.outputs);
+
+	config_fd = open_config_file("weston.ini");
+	desktop.config = weston_config_parse(config_fd);
+	close(config_fd);
+
+	s = weston_config_get_section(desktop.config, "shell", NULL, NULL);
+	weston_config_section_get_bool(s, "locking", &desktop.locking, 1);
 
 	desktop.display = display_create(&argc, argv);
 	if (desktop.display == NULL) {
@@ -1106,29 +1252,13 @@ int main(int argc, char *argv[])
 	display_set_user_data(desktop.display, &desktop);
 	display_set_global_handler(desktop.display, global_handler);
 
-	wl_list_for_each(output, &desktop.outputs, link) {
-		struct wl_surface *surface;
-
-		output->panel = panel_create(desktop.display);
-		surface = window_get_wl_surface(output->panel->window);
-		desktop_shell_set_panel(desktop.shell,
-					output->output, surface);
-
-		output->background = background_create(&desktop);
-		surface = window_get_wl_surface(output->background->window);
-		desktop_shell_set_background(desktop.shell,
-					     output->output, surface);
-	}
+	/* Create panel and background for outputs processed before the shell
+	 * global interface was processed */
+	wl_list_for_each(output, &desktop.outputs, link)
+		if (!output->panel)
+			output_init(output, &desktop);
 
 	grab_surface_create(&desktop);
-
-	config_file = config_file_path("weston.ini");
-	ret = parse_config_file(config_file,
-				config_sections, ARRAY_LENGTH(config_sections),
-				&desktop);
-	free(config_file);
-	if (ret < 0)
-		add_default_launcher(&desktop);
 
 	signal(SIGCHLD, sigchild_handler);
 

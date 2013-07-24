@@ -20,6 +20,8 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "config.h"
+
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -44,7 +46,7 @@ enum {
 };
 
 struct tablet_shell {
-	struct wl_resource resource;
+	struct wl_resource *resource;
 
 	struct wl_listener lock_listener;
 	struct wl_listener unlock_listener;
@@ -76,7 +78,7 @@ struct tablet_shell {
 };
 
 struct tablet_client {
-	struct wl_resource resource;
+	struct wl_resource *resource;
 	struct tablet_shell *shell;
 	struct wl_client *client;
 	struct weston_surface *surface;
@@ -146,11 +148,11 @@ tablet_shell_surface_configure(struct weston_surface *surface,
 
 			tablet_shell_set_state(shell, STATE_LOCKED);
 			shell->previous_state = STATE_HOME;
-			tablet_shell_send_show_lockscreen(&shell->resource);
+			tablet_shell_send_show_lockscreen(shell->resource);
 		}
 	} else if (shell->current_client &&
 		   shell->current_client->surface != surface &&
-		   shell->current_client->client == surface->surface.resource.client) {
+		   shell->current_client->client == wl_resource_get_client(surface->resource)) {
 		tablet_shell_set_state(shell, STATE_TASK);
 		shell->current_client->surface = surface;
 		weston_zoom_run(surface, 0.3, 1.0, NULL, NULL);
@@ -177,15 +179,14 @@ tablet_shell_set_lockscreen(struct wl_client *client,
 			    struct wl_resource *resource,
 			    struct wl_resource *surface_resource)
 {
-	struct tablet_shell *shell = resource->data;
-	struct weston_surface *es = surface_resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
+	struct weston_surface *es = wl_resource_get_user_data(surface_resource);
 
 	weston_surface_set_position(es, 0, 0);
 	shell->lockscreen_surface = es;
 	shell->lockscreen_surface->configure = tablet_shell_surface_configure;
 	shell->lockscreen_listener.notify = handle_lockscreen_surface_destroy;
-	wl_signal_add(&es->surface.resource.destroy_signal,
-		      &shell->lockscreen_listener);
+	wl_signal_add(&es->destroy_signal, &shell->lockscreen_listener);
 }
 
 static void
@@ -205,8 +206,8 @@ tablet_shell_set_switcher(struct wl_client *client,
 			  struct wl_resource *resource,
 			  struct wl_resource *surface_resource)
 {
-	struct tablet_shell *shell = resource->data;
-	struct weston_surface *es = surface_resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
+	struct weston_surface *es = wl_resource_get_user_data(surface_resource);
 
 	/* FIXME: Switcher should be centered and the compositor
 	 * should do the tinting of the background.  With the cache
@@ -216,8 +217,7 @@ tablet_shell_set_switcher(struct wl_client *client,
 	weston_surface_set_position(shell->switcher_surface, 0, 0);
 
 	shell->switcher_listener.notify = handle_switcher_surface_destroy;
-	wl_signal_add(&es->surface.resource.destroy_signal,
-		      &shell->switcher_listener);
+	wl_signal_add(&es->destroy_signal, &shell->switcher_listener);
 }
 
 static void
@@ -225,9 +225,9 @@ tablet_shell_set_homescreen(struct wl_client *client,
 			    struct wl_resource *resource,
 			    struct wl_resource *surface_resource)
 {
-	struct tablet_shell *shell = resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
 
-	shell->home_surface = surface_resource->data;
+	shell->home_surface = wl_resource_get_user_data(surface_resource);
 	shell->home_surface->configure = tablet_shell_surface_configure;
 
 	weston_surface_set_position(shell->home_surface, 0, 0);
@@ -279,8 +279,8 @@ tablet_shell_show_grid(struct wl_client *client,
 		       struct wl_resource *resource,
 		       struct wl_resource *surface_resource)
 {
-	struct tablet_shell *shell = resource->data;
-	struct weston_surface *es = surface_resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
+	struct weston_surface *es = wl_resource_get_user_data(surface_resource);
 
 	tablet_shell_switch_to(shell, es);
 }
@@ -290,8 +290,8 @@ tablet_shell_show_panels(struct wl_client *client,
 			 struct wl_resource *resource,
 			 struct wl_resource *surface_resource)
 {
-	struct tablet_shell *shell = resource->data;
-	struct weston_surface *es = surface_resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
+	struct weston_surface *es = wl_resource_get_user_data(surface_resource);
 
 	tablet_shell_switch_to(shell, es);
 }
@@ -300,7 +300,7 @@ static void
 destroy_tablet_client(struct wl_resource *resource)
 {
 	struct tablet_client *tablet_client =
-		container_of(resource, struct tablet_client, resource);
+		wl_resource_get_user_data(resource);
 
 	free(tablet_client->name);
 	free(tablet_client);
@@ -316,7 +316,7 @@ tablet_client_destroy(struct wl_client *client,
 static void
 tablet_client_activate(struct wl_client *client, struct wl_resource *resource)
 {
-	struct tablet_client *tablet_client = resource->data;
+	struct tablet_client *tablet_client = wl_resource_get_user_data(resource);
 	struct tablet_shell *shell = tablet_client->shell;
 
 	shell->current_client = tablet_client;
@@ -336,7 +336,7 @@ tablet_shell_create_client(struct wl_client *client,
 			   struct wl_resource *resource,
 			   uint32_t id, const char *name, int fd)
 {
-	struct tablet_shell *shell = resource->data;
+	struct tablet_shell *shell = wl_resource_get_user_data(resource);
 	struct weston_compositor *compositor = shell->compositor;
 	struct tablet_client *tablet_client;
 
@@ -350,14 +350,12 @@ tablet_shell_create_client(struct wl_client *client,
 	tablet_client->shell = shell;
 	tablet_client->name = strdup(name);
 
-	tablet_client->resource.destroy = destroy_tablet_client;
-	tablet_client->resource.object.id = id;
-	tablet_client->resource.object.interface =
-		&tablet_client_interface;
-	tablet_client->resource.object.implementation =
-		(void (**)(void)) &tablet_client_implementation;
+	tablet_client->resource =
+		wl_resource_create(client, &tablet_client_interface, 1, id);
+	wl_resource_set_implementation(tablet_client->resource,
+				       &tablet_client_implementation,
+				       tablet_client, destroy_tablet_client);
 
-	wl_client_add_resource(client, &tablet_client->resource);
 	tablet_client->surface = NULL;
 	shell->current_client = tablet_client;
 
@@ -389,10 +387,10 @@ toggle_switcher(struct tablet_shell *shell)
 {
 	switch (shell->state) {
 	case STATE_SWITCHER:
-		tablet_shell_send_hide_switcher(&shell->resource);
+		tablet_shell_send_hide_switcher(shell->resource);
 		break;
 	default:
-		tablet_shell_send_show_switcher(&shell->resource);
+		tablet_shell_send_show_switcher(shell->resource);
 		tablet_shell_set_state(shell, STATE_SWITCHER);
 		break;
 	}
@@ -407,9 +405,9 @@ tablet_shell_lock(struct wl_listener *listener, void *data)
 	if (shell->state == STATE_LOCKED)
 		return;
 	if (shell->state == STATE_SWITCHER)
-		tablet_shell_send_hide_switcher(&shell->resource);
+		tablet_shell_send_hide_switcher(shell->resource);
 
-	tablet_shell_send_show_lockscreen(&shell->resource);
+	tablet_shell_send_show_lockscreen(shell->resource);
 	tablet_shell_set_state(shell, STATE_LOCKED);
 }
 
@@ -417,16 +415,16 @@ static void
 tablet_shell_unlock(struct wl_listener *listener, void *data)
 {
 	struct tablet_shell *shell =
-		container_of(listener, struct tablet_shell, lock_listener);
+		container_of(listener, struct tablet_shell, unlock_listener);
 
-	weston_compositor_wake(shell->compositor);
+	tablet_shell_set_state(shell, STATE_HOME);
 }
 
 static void
 go_home(struct tablet_shell *shell, struct weston_seat *seat)
 {
 	if (shell->state == STATE_SWITCHER)
-		tablet_shell_send_hide_switcher(&shell->resource);
+		tablet_shell_send_hide_switcher(shell->resource);
 
 	weston_surface_activate(shell->home_surface, seat);
 
@@ -445,7 +443,7 @@ long_press_handler(void *data)
 }
 
 static void
-menu_key_binding(struct wl_seat *seat, uint32_t time, uint32_t key, void *data)
+menu_key_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
 {
 	struct tablet_shell *shell = data;
 
@@ -456,7 +454,7 @@ menu_key_binding(struct wl_seat *seat, uint32_t time, uint32_t key, void *data)
 }
 
 static void
-home_key_binding(struct wl_seat *seat, uint32_t time, uint32_t key, void *data)
+home_key_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
 {
 	struct tablet_shell *shell = data;
 
@@ -499,15 +497,11 @@ bind_tablet_shell(struct wl_client *client, void *data, uint32_t version,
 		 * tries to access the object?. */
 		return;
 
-	shell->resource.object.id = id;
-	shell->resource.object.interface = &tablet_shell_interface;
-	shell->resource.object.implementation =
-		(void (**)(void)) &tablet_shell_implementation;
-	shell->resource.client = client;
-	shell->resource.data = shell;
-	shell->resource.destroy = destroy_tablet_shell;
-
-	wl_client_add_resource(client, &shell->resource);
+	shell->resource =
+		wl_resource_create(client, &tablet_shell_interface, 1, id);
+	wl_resource_set_implementation(shell->resource,
+				       &tablet_shell_implementation,
+				       shell, destroy_tablet_shell);
 }
 
 static void
@@ -528,7 +522,7 @@ tablet_shell_destroy(struct wl_listener *listener, void *data)
 
 WL_EXPORT int
 module_init(struct weston_compositor *compositor,
-	    int *argc, char *argv[], const char *config_file)
+	    int *argc, char *argv[])
 {
 	struct tablet_shell *shell;
 	struct wl_event_loop *loop;
@@ -548,8 +542,8 @@ module_init(struct weston_compositor *compositor,
 	wl_signal_add(&compositor->wake_signal, &shell->unlock_listener);
 
 	/* FIXME: This will make the object available to all clients. */
-	wl_display_add_global(compositor->wl_display, &tablet_shell_interface,
-			      shell, bind_tablet_shell);
+	wl_global_create(compositor->wl_display, &tablet_shell_interface, 1,
+			 shell, bind_tablet_shell);
 
 	loop = wl_display_get_event_loop(compositor->wl_display);
 	shell->long_press_source =

@@ -23,7 +23,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
+#include "config.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -52,6 +52,7 @@ struct fbdev_compositor {
 
 	struct udev *udev;
 	struct tty *tty;
+	struct udev_input input;
 };
 
 struct fbdev_screeninfo {
@@ -88,15 +89,6 @@ struct fbdev_output {
 	uint8_t depth;
 };
 
-struct fbdev_seat {
-	struct weston_seat base;
-	struct wl_list devices_list;
-
-	struct udev_monitor *udev_monitor;
-	struct wl_event_source *udev_monitor_source;
-	char *seat_id;
-};
-
 struct fbdev_parameters {
 	int tty;
 	char *device;
@@ -108,12 +100,6 @@ static inline struct fbdev_output *
 to_fbdev_output(struct weston_output *base)
 {
 	return container_of(base, struct fbdev_output, base);
-}
-
-static inline struct fbdev_seat *
-to_fbdev_seat(struct weston_seat *base)
-{
-	return container_of(base, struct fbdev_seat, base);
 }
 
 static inline struct fbdev_compositor *
@@ -537,7 +523,8 @@ fbdev_output_create(struct fbdev_compositor *compositor,
 	weston_output_init(&output->base, &compositor->base,
 	                   0, 0, output->fb_info.width_mm,
 	                   output->fb_info.height_mm,
-	                   WL_OUTPUT_TRANSFORM_NORMAL);
+	                   WL_OUTPUT_TRANSFORM_NORMAL,
+			   1);
 
 	width = output->fb_info.x_resolution;
 	height = output->fb_info.y_resolution;
@@ -750,11 +737,8 @@ static void
 fbdev_compositor_destroy(struct weston_compositor *base)
 {
 	struct fbdev_compositor *compositor = to_fbdev_compositor(base);
-	struct udev_seat *seat, *next;
 
-	/* Destroy all inputs. */
-	wl_list_for_each_safe(seat, next, &compositor->base.seat_list, base.link)
-		udev_seat_destroy(seat);
+	udev_input_destroy(&compositor->input);
 
 	/* Destroy the output. */
 	weston_compositor_shutdown(&compositor->base);
@@ -770,7 +754,6 @@ static void
 vt_func(struct weston_compositor *base, int event)
 {
 	struct fbdev_compositor *compositor = to_fbdev_compositor(base);
-	struct udev_seat *seat;
 	struct weston_output *output;
 
 	switch (event) {
@@ -785,13 +768,11 @@ vt_func(struct weston_compositor *base, int event)
 
 		weston_compositor_damage_all(&compositor->base);
 
-		wl_list_for_each(seat, &compositor->base.seat_list, base.link)
-			udev_seat_enable(seat, compositor->udev);
+		udev_input_enable(&compositor->input, compositor->udev);
 		break;
 	case TTY_LEAVE_VT:
 		weston_log("leaving VT\n");
-		wl_list_for_each(seat, &compositor->base.seat_list, base.link)
-			udev_seat_disable(seat);
+		udev_input_disable(&compositor->input);
 
 		wl_list_for_each(output, &compositor->base.output_list, link) {
 			fbdev_output_disable(output);
@@ -826,7 +807,7 @@ fbdev_restore(struct weston_compositor *base)
 }
 
 static void
-switch_vt_binding(struct wl_seat *seat, uint32_t time, uint32_t key, void *data)
+switch_vt_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
 {
 	struct fbdev_compositor *ec = data;
 
@@ -835,10 +816,11 @@ switch_vt_binding(struct wl_seat *seat, uint32_t time, uint32_t key, void *data)
 
 static struct weston_compositor *
 fbdev_compositor_create(struct wl_display *display, int *argc, char *argv[],
-                        const char *config_file, struct fbdev_parameters *param)
+                        struct weston_config *config,
+			struct fbdev_parameters *param)
 {
 	struct fbdev_compositor *compositor;
-	const char *seat = default_seat;
+	const char *seat_id = default_seat;
 	uint32_t key;
 
 	weston_log("initializing fbdev backend\n");
@@ -848,7 +830,7 @@ fbdev_compositor_create(struct wl_display *display, int *argc, char *argv[],
 		return NULL;
 
 	if (weston_compositor_init(&compositor->base, display, argc, argv,
-	                           config_file) < 0)
+	                           config) < 0)
 		goto out_free;
 
 	compositor->udev = udev_new();
@@ -882,7 +864,7 @@ fbdev_compositor_create(struct wl_display *display, int *argc, char *argv[],
 	if (fbdev_output_create(compositor, param->device) < 0)
 		goto out_pixman;
 
-	udev_seat_create(&compositor->base, compositor->udev, seat);
+	udev_input_init(&compositor->input, &compositor->base, compositor->udev, seat_id);
 
 	return &compositor->base;
 
@@ -906,7 +888,7 @@ out_free:
 
 WL_EXPORT struct weston_compositor *
 backend_init(struct wl_display *display, int *argc, char *argv[],
-	     const char *config_file)
+	     struct weston_config *config)
 {
 	/* TODO: Ideally, available frame buffers should be enumerated using
 	 * udev, rather than passing a device node in as a parameter. */
@@ -922,6 +904,5 @@ backend_init(struct wl_display *display, int *argc, char *argv[],
 
 	parse_options(fbdev_options, ARRAY_LENGTH(fbdev_options), argc, argv);
 
-	return fbdev_compositor_create(display, argc, argv, config_file,
-	                               &param);
+	return fbdev_compositor_create(display, argc, argv, config, &param);
 }

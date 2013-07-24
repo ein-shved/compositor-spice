@@ -68,7 +68,7 @@ static void
 notify_pointer_position(struct weston_test *test, struct wl_resource *resource)
 {
 	struct weston_seat *seat = get_seat(test);
-	struct wl_pointer *pointer = seat->seat.pointer;
+	struct weston_pointer *pointer = seat->pointer;
 
 	wl_test_send_pointer_position(resource, pointer->x, pointer->y);
 }
@@ -95,7 +95,8 @@ move_surface(struct wl_client *client, struct wl_resource *resource,
 	     struct wl_resource *surface_resource,
 	     int32_t x, int32_t y)
 {
-	struct weston_surface *surface = surface_resource->data;
+	struct weston_surface *surface =
+		wl_resource_get_user_data(surface_resource);
 	struct weston_test_surface *test_surface;
 
 	surface->configure = test_surface_configure;
@@ -108,7 +109,7 @@ move_surface(struct wl_client *client, struct wl_resource *resource,
 	}
 
 	test_surface->surface = surface;
-	test_surface->test = resource->data;
+	test_surface->test = wl_resource_get_user_data(resource);
 	test_surface->x = x;
 	test_surface->y = y;
 }
@@ -117,9 +118,9 @@ static void
 move_pointer(struct wl_client *client, struct wl_resource *resource,
 	     int32_t x, int32_t y)
 {
-	struct weston_test *test = resource->data;
+	struct weston_test *test = wl_resource_get_user_data(resource);
 	struct weston_seat *seat = get_seat(test);
-	struct wl_pointer *pointer = seat->seat.pointer;
+	struct weston_pointer *pointer = seat->pointer;
 
 	test->compositor->focus = 1;
 
@@ -134,7 +135,7 @@ static void
 send_button(struct wl_client *client, struct wl_resource *resource,
 	    int32_t button, uint32_t state)
 {
-	struct weston_test *test = resource->data;
+	struct weston_test *test = wl_resource_get_user_data(resource);
 	struct weston_seat *seat = get_seat(test);
 
 	test->compositor->focus = 1;
@@ -147,15 +148,15 @@ activate_surface(struct wl_client *client, struct wl_resource *resource,
 		 struct wl_resource *surface_resource)
 {
 	struct weston_surface *surface = surface_resource ?
-					surface_resource->data : NULL;
-	struct weston_test *test = resource->data;
+		wl_resource_get_user_data(surface_resource) : NULL;
+	struct weston_test *test = wl_resource_get_user_data(resource);
 	struct weston_seat *seat;
 
 	seat = get_seat(test);
 
 	if (surface) {
 		weston_surface_activate(surface, seat);
-		notify_keyboard_focus_in(seat, &seat->keyboard.keyboard.keys,
+		notify_keyboard_focus_in(seat, &seat->keyboard->keys,
 					 STATE_UPDATE_AUTOMATIC);
 	}
 	else {
@@ -168,7 +169,7 @@ static void
 send_key(struct wl_client *client, struct wl_resource *resource,
 	 uint32_t key, enum wl_keyboard_key_state state)
 {
-	struct weston_test *test = resource->data;
+	struct weston_test *test = wl_resource_get_user_data(resource);
 	struct weston_seat *seat = get_seat(test);
 
 	test->compositor->focus = 1;
@@ -190,8 +191,9 @@ bind_test(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 	struct weston_test *test = data;
 	struct wl_resource *resource;
 
-	resource = wl_client_add_object(client, &wl_test_interface,
-					&test_implementation, id, test);
+	resource = wl_resource_create(client, &wl_test_interface, 1, id);
+	wl_resource_set_implementation(resource,
+				       &test_implementation, test, NULL);
 
 	notify_pointer_position(test, resource);
 }
@@ -225,7 +227,7 @@ idle_launch_client(void *data)
 
 WL_EXPORT int
 module_init(struct weston_compositor *ec,
-	    int *argc, char *argv[], const char *config_file)
+	    int *argc, char *argv[])
 {
 	struct weston_test *test;
 	struct wl_event_loop *loop;
@@ -238,8 +240,8 @@ module_init(struct weston_compositor *ec,
 	test->compositor = ec;
 	weston_layer_init(&test->layer, &ec->cursor_layer.link);
 
-	if (wl_display_add_global(ec->wl_display, &wl_test_interface,
-				  test, bind_test) == NULL)
+	if (wl_global_create(ec->wl_display, &wl_test_interface, 1,
+			     test, bind_test) == NULL)
 		return -1;
 
 	loop = wl_display_get_event_loop(ec->wl_display);

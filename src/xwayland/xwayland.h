@@ -53,12 +53,14 @@ struct weston_wm {
 	struct weston_xserver *server;
 	xcb_window_t wm_window;
 	struct weston_wm_window *focus_window;
-	struct weston_wm_window *focus_latest;
 	struct theme *theme;
 	xcb_cursor_t *cursors;
 	int last_cursor;
 	xcb_render_pictforminfo_t format_rgb, format_rgba;
+	xcb_visualid_t visual_id;
+	xcb_colormap_t colormap;
 	struct wl_listener activate_listener;
+	struct wl_listener transform_listener;
 	struct wl_listener kill_listener;
 
 	xcb_window_t selection_window;

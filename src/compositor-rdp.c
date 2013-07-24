@@ -20,9 +20,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
+#include "config.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +40,7 @@
 #include "pixman-renderer.h"
 
 #define MAX_FREERDP_FDS 32
+#define DEFAULT_AXIS_STEP_DISTANCE wl_fixed_from_int(10)
 
 struct rdp_compositor_config {
 	int width;
@@ -59,7 +58,6 @@ struct rdp_output;
 
 struct rdp_compositor {
 	struct weston_compositor base;
-	struct weston_seat main_seat;
 
 	freerdp_listener *listener;
 	struct wl_event_source *listener_events[MAX_FREERDP_FDS];
@@ -94,12 +92,9 @@ struct rdp_output {
 
 struct rdp_peer_context {
 	rdpContext _p;
+
 	struct rdp_compositor *rdpCompositor;
-
-	/* file descriptors and associated events */
-	int fds[MAX_FREERDP_FDS];
 	struct wl_event_source *events[MAX_FREERDP_FDS];
-
 	RFX_CONTEXT *rfx_context;
 	wStream *encode_stream;
 	RFX_RECT *rfx_rects;
@@ -133,8 +128,8 @@ rdp_peer_refresh_rfx(pixman_region32_t *damage, pixman_image_t *image, freerdp_p
 	SURFACE_BITS_COMMAND *cmd = &update->surface_bits_command;
 	RdpPeerContext *context = (RdpPeerContext *)peer->context;
 
-	stream_clear(context->encode_stream);
-	stream_set_pos(context->encode_stream, 0);
+	Stream_Clear(context->encode_stream);
+	Stream_SetPosition(context->encode_stream, 0);
 
 	width = (damage->extents.x2 - damage->extents.x1);
 	height = (damage->extents.y2 - damage->extents.y1);
@@ -169,8 +164,8 @@ rdp_peer_refresh_rfx(pixman_region32_t *damage, pixman_image_t *image, freerdp_p
 			pixman_image_get_stride(image)
 	);
 
-	cmd->bitmapDataLength = stream_get_length(context->encode_stream);
-	cmd->bitmapData = stream_get_head(context->encode_stream);
+	cmd->bitmapDataLength = Stream_GetPosition(context->encode_stream);
+	cmd->bitmapData = Stream_Buffer(context->encode_stream);
 
 	update->SurfaceBits(update->context, cmd);
 }
@@ -185,8 +180,8 @@ rdp_peer_refresh_nsc(pixman_region32_t *damage, pixman_image_t *image, freerdp_p
 	SURFACE_BITS_COMMAND *cmd = &update->surface_bits_command;
 	RdpPeerContext *context = (RdpPeerContext *)peer->context;
 
-	stream_clear(context->encode_stream);
-	stream_set_pos(context->encode_stream, 0);
+	Stream_Clear(context->encode_stream);
+	Stream_SetPosition(context->encode_stream, 0);
 
 	width = (damage->extents.x2 - damage->extents.x1);
 	height = (damage->extents.y2 - damage->extents.y1);
@@ -206,42 +201,79 @@ rdp_peer_refresh_nsc(pixman_region32_t *damage, pixman_image_t *image, freerdp_p
 	nsc_compose_message(context->nsc_context, context->encode_stream, (BYTE *)ptr,
 			cmd->width,	cmd->height,
 			pixman_image_get_stride(image));
-	cmd->bitmapDataLength = stream_get_length(context->encode_stream);
-	cmd->bitmapData = stream_get_head(context->encode_stream);
+	cmd->bitmapDataLength = Stream_GetPosition(context->encode_stream);
+	cmd->bitmapData = Stream_Buffer(context->encode_stream);
 	update->SurfaceBits(update->context, cmd);
+}
+
+static void
+pixman_image_flipped_subrect(const pixman_box32_t *rect, pixman_image_t *img, BYTE *dest) {
+	int stride = pixman_image_get_stride(img);
+	int h;
+	int toCopy = (rect->x2 - rect->x1) * 4;
+	int height = (rect->y2 - rect->y1);
+	const BYTE *src = (const BYTE *)pixman_image_get_data(img);
+	src += ((rect->y2-1) * stride) + (rect->x1 * 4);
+
+	for (h = 0; h < height; h++, src -= stride, dest += toCopy)
+		   memcpy(dest, src, toCopy);
 }
 
 static void
 rdp_peer_refresh_raw(pixman_region32_t *region, pixman_image_t *image, freerdp_peer *peer)
 {
-	pixman_image_t *tile;
 	rdpUpdate *update = peer->update;
 	SURFACE_BITS_COMMAND *cmd = &update->surface_bits_command;
-	pixman_box32_t *extends = pixman_region32_extents(region);
+	SURFACE_FRAME_MARKER *marker = &update->surface_frame_marker;
+	pixman_box32_t *rect, subrect;
+	int nrects, i;
+	int heightIncrement, remainingHeight, top;
+
+	rect = pixman_region32_rectangles(region, &nrects);
+	if (!nrects)
+		return;
+
+	marker->frameId++;
+	marker->frameAction = SURFACECMD_FRAMEACTION_BEGIN;
+	update->SurfaceFrameMarker(peer->context, marker);
 
 	cmd->bpp = 32;
 	cmd->codecID = 0;
-	cmd->width = (extends->x2 - extends->x1);
-	cmd->height = (extends->y2 - extends->y1);;
-	cmd->bitmapDataLength = cmd->width * cmd->height * 4;
-	tile = pixman_image_create_bits(PIXMAN_x8r8g8b8, cmd->width, cmd->height, 0, cmd->width * 4);
-	pixman_image_composite32(PIXMAN_OP_SRC,	image, NULL, /* op, src, mask */
-		tile, extends->x1, extends->y1, /* dest, src_x, src_y */
-		0, 0, /* mask_x, mask_y */
-		0, 0, /* dest_x, dest_y */
-		cmd->width, cmd->height /* width, height */
-	);
-	freerdp_image_flip((BYTE *)pixman_image_get_data(tile),
-			(BYTE *)pixman_image_get_data(tile),
-			cmd->width, cmd->height, cmd->bpp
-	);
-	cmd->bitmapData = (BYTE *)pixman_image_get_data(tile);
-	cmd->destLeft = extends->x1;
-	cmd->destTop = extends->y1;
-	cmd->destRight = extends->x2;
-	cmd->destBottom = extends->y2;
-	update->SurfaceBits(peer->context, cmd);
-	pixman_image_unref(tile);
+
+	for (i = 0; i < nrects; i++, rect++) {
+		/*weston_log("rect(%d,%d, %d,%d)\n", rect->x1, rect->y1, rect->x2, rect->y2);*/
+		cmd->destLeft = rect->x1;
+		cmd->destRight = rect->x2;
+		cmd->width = rect->x2 - rect->x1;
+
+		heightIncrement = peer->settings->MultifragMaxRequestSize / (16 + cmd->width * 4);
+		remainingHeight = rect->y2 - rect->y1;
+		top = rect->y1;
+
+		subrect.x1 = rect->x1;
+		subrect.x2 = rect->x2;
+
+		while (remainingHeight) {
+			   cmd->height = (remainingHeight > heightIncrement) ? heightIncrement : remainingHeight;
+			   cmd->destTop = top;
+			   cmd->destBottom = top + cmd->height;
+			   cmd->bitmapDataLength = cmd->width * cmd->height * 4;
+			   cmd->bitmapData = (BYTE *)realloc(cmd->bitmapData, cmd->bitmapDataLength);
+
+			   subrect.y1 = top;
+			   subrect.y2 = top + cmd->height;
+			   pixman_image_flipped_subrect(&subrect, image, cmd->bitmapData);
+
+			   /*weston_log("*  sending (%d,%d, %d,%d)\n", subrect.x1, subrect.y1, subrect.x2, subrect.y2); */
+			   update->SurfaceBits(peer->context, cmd);
+
+			   remainingHeight -= cmd->height;
+			   top += cmd->height;
+		}
+	}
+
+	marker->frameAction = SURFACECMD_FRAMEACTION_END;
+	update->SurfaceFrameMarker(peer->context, marker);
 }
 
 static void
@@ -250,20 +282,13 @@ rdp_peer_refresh_region(pixman_region32_t *region, freerdp_peer *peer)
 	RdpPeerContext *context = (RdpPeerContext *)peer->context;
 	struct rdp_output *output = context->rdpCompositor->output;
 	rdpSettings *settings = peer->settings;
-	pixman_box32_t *extents = pixman_region32_extents(region);
 
-	int regionSz = (extents->x2 - extents->x1) * (extents->y2 - extents->y1);
-
-	if(regionSz > 64 * 64) {
-		if(settings->RemoteFxCodec)
-			rdp_peer_refresh_rfx(region, output->shadow_surface, peer);
-		else if(settings->NSCodec)
-			rdp_peer_refresh_nsc(region, output->shadow_surface, peer);
-		else
-			rdp_peer_refresh_raw(region, output->shadow_surface, peer);
-	} else {
+	if (settings->RemoteFxCodec)
+		rdp_peer_refresh_rfx(region, output->shadow_surface, peer);
+	else if (settings->NSCodec)
+		rdp_peer_refresh_nsc(region, output->shadow_surface, peer);
+	else
 		rdp_peer_refresh_raw(region, output->shadow_surface, peer);
-	}
 }
 
 static void
@@ -444,7 +469,7 @@ rdp_compositor_create_output(struct rdp_compositor *c, int width, int height,
 
 	output->base.current = currentMode;
 	weston_output_init(&output->base, &c->base, 0, 0, width, height,
-			WL_OUTPUT_TRANSFORM_NORMAL);
+			   WL_OUTPUT_TRANSFORM_NORMAL, 1);
 
 	output->base.make = "weston";
 	output->base.model = "rdp";
@@ -498,10 +523,6 @@ rdp_restore(struct weston_compositor *ec)
 static void
 rdp_destroy(struct weston_compositor *ec)
 {
-	struct rdp_compositor *c = (struct rdp_compositor *) ec;
-
-	weston_seat_release(&c->main_seat);
-
 	ec->renderer->destroy(ec);
 	weston_compositor_shutdown(ec);
 
@@ -560,9 +581,9 @@ rdp_peer_context_new(freerdp_peer* client, RdpPeerContext* context)
 	rfx_context_set_pixel_format(context->rfx_context, RDP_PIXEL_FORMAT_B8G8R8A8);
 
 	context->nsc_context = nsc_context_new();
-	rfx_context_set_pixel_format(context->rfx_context, RDP_PIXEL_FORMAT_B8G8R8A8);
+	nsc_context_set_pixel_format(context->nsc_context, RDP_PIXEL_FORMAT_B8G8R8A8);
 
-	context->encode_stream = stream_new(65536);
+	context->encode_stream = Stream_New(NULL, 65536);
 }
 
 static void
@@ -574,13 +595,13 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 
 	wl_list_remove(&context->item.link);
 	for(i = 0; i < MAX_FREERDP_FDS; i++) {
-		if(context->fds[i] != -1)
+		if (context->events[i])
 			wl_event_source_remove(context->events[i]);
 	}
 
 	if(context->item.flags & RDP_PEER_ACTIVATED)
 		weston_seat_release(&context->item.seat);
-	stream_free(context->encode_stream);
+	Stream_Free(context->encode_stream, TRUE);
 	nsc_context_free(context->nsc_context);
 	rfx_context_free(context->rfx_context);
 	free(context->rfx_rects);
@@ -645,10 +666,14 @@ xf_peer_post_connect(freerdp_peer* client)
 	struct rdp_compositor *c;
 	struct rdp_output *output;
 	rdpSettings *settings;
+	rdpPointerUpdate *pointer;
 	struct xkb_context *xkbContext;
 	struct xkb_rule_names xkbRuleNames;
 	struct xkb_keymap *keymap;
 	int i;
+	pixman_box32_t box;
+	pixman_region32_t damage;
+
 
 	peerCtx = (RdpPeerContext *)client->context;
 	c = peerCtx->rdpCompositor;
@@ -702,18 +727,37 @@ xf_peer_post_connect(freerdp_peer* client)
 	weston_seat_init_pointer(&peerCtx->item.seat);
 
 	peerCtx->item.flags |= RDP_PEER_ACTIVATED;
+
+	/* disable pointer on the client side */
+	pointer = client->update->pointer;
+	pointer->pointer_system.type = SYSPTR_NULL;
+	pointer->PointerSystem(client->context, &pointer->pointer_system);
+
+	/* sends a full refresh */
+	box.x1 = 0;
+	box.y1 = 0;
+	box.x2 = output->base.width;
+	box.y2 = output->base.height;
+	pixman_region32_init_with_extents(&damage, &box);
+
+	rdp_peer_refresh_region(&damage, client);
+
+	pixman_region32_fini(&damage);
+
 	return TRUE;
 }
 
 static BOOL
 xf_peer_activate(freerdp_peer *client)
 {
+	RdpPeerContext *context = (RdpPeerContext *)client->context;
+	rfx_context_reset(context->rfx_context);
 	return TRUE;
 }
 
 static void
 xf_mouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
-	wl_fixed_t wl_x, wl_y;
+	wl_fixed_t wl_x, wl_y, axis;
 	RdpPeerContext *peerContext = (RdpPeerContext *)input->context;
 	struct rdp_output *output;
 	uint32_t button = 0;
@@ -740,6 +784,22 @@ xf_mouseEvent(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
 			(flags & PTR_FLAGS_DOWN) ? WL_POINTER_BUTTON_STATE_PRESSED : WL_POINTER_BUTTON_STATE_RELEASED
 		);
 	}
+
+	if (flags & PTR_FLAGS_WHEEL) {
+		/* DEFAULT_AXIS_STEP_DISTANCE is stolen from compositor-x11.c
+		 * The RDP specs says the lower bits of flags contains the "the number of rotation
+		 * units the mouse wheel was rotated".
+		 *
+		 * http://blogs.msdn.com/b/oldnewthing/archive/2013/01/23/10387366.aspx explains the 120 value
+		 */
+		axis = (DEFAULT_AXIS_STEP_DISTANCE * (flags & 0xff)) / 120;
+		if (flags & PTR_FLAGS_WHEEL_NEGATIVE)
+			axis = -axis;
+
+		notify_axis(&peerContext->item.seat, weston_compositor_get_time(),
+					    WL_POINTER_AXIS_VERTICAL_SCROLL,
+					    axis);
+	}
 }
 
 static void
@@ -762,15 +822,10 @@ static void
 xf_input_synchronize_event(rdpInput *input, UINT32 flags)
 {
 	freerdp_peer *client = input->context->peer;
-	rdpPointerUpdate *pointer = client->update->pointer;
 	RdpPeerContext *peerCtx = (RdpPeerContext *)input->context;
 	struct rdp_output *output = peerCtx->rdpCompositor->output;
 	pixman_box32_t box;
 	pixman_region32_t damage;
-
-	/* disable pointer on the client side */
-	pointer->pointer_system.type = SYSPTR_NULL;
-	pointer->PointerSystem(client->context, &pointer->pointer_system);
 
 	/* sends a full refresh */
 	box.x1 = 0;
@@ -858,8 +913,9 @@ rdp_peer_init(freerdp_peer *client, struct rdp_compositor *c)
 	rdpSettings	*settings;
 	rdpInput *input;
 	RdpPeerContext *peerCtx;
+	char seat_name[32];
 
-	client->context_size = sizeof(RdpPeerContext);
+	client->ContextSize = sizeof(RdpPeerContext);
 	client->ContextNew = (psPeerContextNew)rdp_peer_context_new;
 	client->ContextFree = (psPeerContextFree)rdp_peer_context_free;
 	freerdp_peer_context_new(client);
@@ -890,7 +946,11 @@ rdp_peer_init(freerdp_peer *client, struct rdp_compositor *c)
 	input->ExtendedMouseEvent = xf_extendedMouseEvent;
 	input->KeyboardEvent = xf_input_keyboard_event;
 	input->UnicodeKeyboardEvent = xf_input_unicode_keyboard_event;
-	weston_seat_init(&peerCtx->item.seat, &c->base);
+
+	if (snprintf(seat_name, 32, "rdp:%d:%s", client->sockfd, client->hostname) >= 32)
+		seat_name[31] = '\0';
+
+	weston_seat_init(&peerCtx->item.seat, &c->base, seat_name);
 
 	client->Initialize(client);
 
@@ -903,14 +963,11 @@ rdp_peer_init(freerdp_peer *client, struct rdp_compositor *c)
 	for(i = 0; i < rcount; i++) {
 		fd = (int)(long)(rfds[i]);
 
-		peerCtx->fds[i] = fd;
 		peerCtx->events[i] = wl_event_loop_add_fd(loop, fd, WL_EVENT_READABLE,
 				rdp_client_activity, client);
 	}
-	for( ; i < MAX_FREERDP_FDS; i++) {
-		peerCtx->fds[i] = -1;
+	for ( ; i < MAX_FREERDP_FDS; i++)
 		peerCtx->events[i] = 0;
-	}
 
 	wl_list_insert(&c->output->peers, &peerCtx->item.link);
 	return 0;
@@ -928,7 +985,7 @@ rdp_incoming_peer(freerdp_listener *instance, freerdp_peer *client)
 static struct weston_compositor *
 rdp_compositor_create(struct wl_display *display,
 		struct rdp_compositor_config *config,
-		int *argc, char *argv[], const char *config_file)
+		int *argc, char *argv[], struct weston_config *wconfig)
 {
 	struct rdp_compositor *c;
 	char *fd_str;
@@ -940,11 +997,9 @@ rdp_compositor_create(struct wl_display *display,
 
 	memset(c, 0, sizeof *c);
 
-	if (weston_compositor_init(&c->base, display, argc, argv,
-				   config_file) < 0)
+	if (weston_compositor_init(&c->base, display, argc, argv, wconfig) < 0)
 		goto err_free;
 
-	weston_seat_init(&c->main_seat, &c->base);
 	c->base.destroy = rdp_destroy;
 	c->base.restore = rdp_restore;
 	c->rdp_key = config->rdp_key ? strdup(config->rdp_key) : NULL;
@@ -1004,7 +1059,6 @@ err_free_strings:
 		free(c->server_cert);
 	if(c->server_key)
 		free(c->server_key);
-	weston_seat_release(&c->main_seat);
 err_free:
 	free(c);
 	return NULL;
@@ -1012,7 +1066,7 @@ err_free:
 
 WL_EXPORT struct weston_compositor *
 backend_init(struct wl_display *display, int *argc, char *argv[],
-	     const char *config_file)
+	     struct weston_config *wconfig)
 {
 	struct rdp_compositor_config config;
 	rdp_compositor_config_init(&config);
@@ -1035,5 +1089,5 @@ backend_init(struct wl_display *display, int *argc, char *argv[],
 	};
 
 	parse_options(rdp_options, ARRAY_LENGTH(rdp_options), argc, argv);
-	return rdp_compositor_create(display, &config, argc, argv, config_file);
+	return rdp_compositor_create(display, &config, argc, argv, wconfig);
 }

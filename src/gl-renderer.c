@@ -20,7 +20,7 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#define _GNU_SOURCE
+#include "config.h"
 
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
@@ -44,6 +44,7 @@ struct gl_shader {
 	GLint tex_uniforms[3];
 	GLint alpha_uniform;
 	GLint color_uniform;
+	const char *vertex_source, *fragment_source;
 };
 
 #define BUFFER_DAMAGE_COUNT 2
@@ -53,12 +54,19 @@ struct gl_output_state {
 	pixman_region32_t buffer_damage[BUFFER_DAMAGE_COUNT];
 };
 
+enum buffer_type {
+	BUFFER_TYPE_NULL,
+	BUFFER_TYPE_SHM,
+	BUFFER_TYPE_EGL
+};
+
 struct gl_surface_state {
 	GLfloat color[4];
 	struct gl_shader *shader;
 
 	GLuint textures[3];
 	int num_textures;
+	int needs_full_upload;
 	pixman_region32_t texture_damage;
 
 	EGLImageKHR images[3];
@@ -66,12 +74,15 @@ struct gl_surface_state {
 	int num_images;
 
 	struct weston_buffer_reference buffer_ref;
+	enum buffer_type buffer_type;
 	int pitch; /* in pixels */
+	int height; /* in pixels */
 };
 
 struct gl_renderer {
 	struct weston_renderer base;
 	int fragment_shader_debug;
+	int fan_debug;
 
 	EGLDisplay egl_display;
 	EGLContext egl_context;
@@ -82,6 +93,10 @@ struct gl_renderer {
 		GLuint texture;
 		int32_t width, height;
 	} border;
+
+	struct wl_array vertices;
+	struct wl_array indices; /* only used in compositor-wayland */
+	struct wl_array vtxcnt;
 
 	PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_target_texture_2d;
 	PFNEGLCREATEIMAGEKHRPROC create_image;
@@ -530,6 +545,7 @@ texture_region(struct weston_surface *es, pixman_region32_t *region,
 {
 	struct gl_surface_state *gs = get_surface_state(es);
 	struct weston_compositor *ec = es->compositor;
+	struct gl_renderer *gr = get_renderer(ec);
 	GLfloat *v, inv_width, inv_height;
 	unsigned int *vtxcnt, nvtx = 0;
 	pixman_box32_t *rects, *surf_rects;
@@ -541,21 +557,11 @@ texture_region(struct weston_surface *es, pixman_region32_t *region,
 	/* worst case we can have 8 vertices per rect (ie. clipped into
 	 * an octagon):
 	 */
-	v = wl_array_add(&ec->vertices, nrects * nsurf * 8 * 4 * sizeof *v);
-	vtxcnt = wl_array_add(&ec->vtxcnt, nrects * nsurf * sizeof *vtxcnt);
+	v = wl_array_add(&gr->vertices, nrects * nsurf * 8 * 4 * sizeof *v);
+	vtxcnt = wl_array_add(&gr->vtxcnt, nrects * nsurf * sizeof *vtxcnt);
 
 	inv_width = 1.0 / gs->pitch;
-
-	switch (es->buffer_transform) {
-	case WL_OUTPUT_TRANSFORM_90:
-	case WL_OUTPUT_TRANSFORM_270:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
-	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
-		inv_height = 1.0 / es->geometry.width;
-		break;
-	default:
-		inv_height = 1.0 / es->geometry.height;
-	}
+        inv_height = 1.0 / gs->height;
 
 	for (i = 0; i < nrects; i++) {
 		pixman_box32_t *rect = &rects[i];
@@ -648,6 +654,7 @@ repaint_region(struct weston_surface *es, pixman_region32_t *region,
 		pixman_region32_t *surf_region)
 {
 	struct weston_compositor *ec = es->compositor;
+	struct gl_renderer *gr = get_renderer(ec);
 	GLfloat *v;
 	unsigned int *vtxcnt;
 	int i, first, nfans;
@@ -658,12 +665,12 @@ repaint_region(struct weston_surface *es, pixman_region32_t *region,
 	 * coordinates. texture_region() will iterate over all pairs of
 	 * rectangles from both regions, compute the intersection
 	 * polygon for each pair, and store it as a triangle fan if
-	 * it has a non-zero area (at least 3 vertices, actually).
+	 * it has a non-zero area (at least 3 vertices1, actually).
 	 */
 	nfans = texture_region(es, region, surf_region);
 
-	v = ec->vertices.data;
-	vtxcnt = ec->vtxcnt.data;
+	v = gr->vertices.data;
+	vtxcnt = gr->vtxcnt.data;
 
 	/* position: */
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof *v, &v[0]);
@@ -675,7 +682,7 @@ repaint_region(struct weston_surface *es, pixman_region32_t *region,
 
 	for (i = 0, first = 0; i < nfans; i++) {
 		glDrawArrays(GL_TRIANGLE_FAN, first, vtxcnt[i]);
-		if (ec->fan_debug)
+		if (gr->fan_debug)
 			triangle_fan_debug(es, first, vtxcnt[i]);
 		first += vtxcnt[i];
 	}
@@ -683,8 +690,8 @@ repaint_region(struct weston_surface *es, pixman_region32_t *region,
 	glDisableVertexAttribArray(1);
 	glDisableVertexAttribArray(0);
 
-	ec->vertices.size = 0;
-	ec->vtxcnt.size = 0;
+	gr->vertices.size = 0;
+	gr->vtxcnt.size = 0;
 }
 
 static int
@@ -710,13 +717,26 @@ use_output(struct weston_output *output)
 	return 0;
 }
 
+static int
+shader_init(struct gl_shader *shader, struct gl_renderer *gr,
+		   const char *vertex_source, const char *fragment_source);
+
 static void
-use_shader(struct gl_renderer *gr,
-			     struct gl_shader *shader)
+use_shader(struct gl_renderer *gr, struct gl_shader *shader)
 {
+	if (!shader->program) {
+		int ret;
+
+		ret =  shader_init(shader, gr,
+				   shader->vertex_source,
+				   shader->fragment_source);
+
+		if (ret < 0)
+			weston_log("warning: failed to compile shader\n");
+	}
+
 	if (gr->current_shader == shader)
 		return;
-
 	glUseProgram(shader->program);
 	gr->current_shader = shader;
 }
@@ -762,7 +782,7 @@ draw_surface(struct weston_surface *es, struct weston_output *output,
 
 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-	if (ec->fan_debug) {
+	if (gr->fan_debug) {
 		use_shader(gr, &gr->solid_shader);
 		shader_uniforms(&gr->solid_shader, es, output);
 	}
@@ -770,7 +790,7 @@ draw_surface(struct weston_surface *es, struct weston_output *output,
 	use_shader(gr, gs->shader);
 	shader_uniforms(gs->shader, es, output);
 
-	if (es->transform.enabled || output->zoom.active)
+	if (es->transform.enabled || output->zoom.active || output->scale != es->buffer_scale)
 		filter = GL_LINEAR;
 	else
 		filter = GL_NEAREST;
@@ -861,8 +881,8 @@ texture_border(struct weston_output *output)
 	v[3] = 1.0;
 
 	n = 8;
-	d = wl_array_add(&ec->vertices, n * 16 * sizeof *d);
-	p = wl_array_add(&ec->indices, n * 6 * sizeof *p);
+	d = wl_array_add(&gr->vertices, n * 16 * sizeof *d);
+	p = wl_array_add(&gr->indices, n * 6 * sizeof *p);
 
 	k = 0;
 	for (i = 0; i < 3; i++)
@@ -929,20 +949,20 @@ draw_border(struct weston_output *output)
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, gr->border.texture);
 
-	v = ec->vertices.data;
+	v = gr->vertices.data;
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof *v, &v[0]);
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof *v, &v[2]);
 	glEnableVertexAttribArray(0);
 	glEnableVertexAttribArray(1);
 
 	glDrawElements(GL_TRIANGLES, n * 6,
-		       GL_UNSIGNED_INT, ec->indices.data);
+		       GL_UNSIGNED_INT, gr->indices.data);
 
 	glDisableVertexAttribArray(1);
 	glDisableVertexAttribArray(0);
 
-	ec->vertices.size = 0;
-	ec->indices.size = 0;
+	gr->vertices.size = 0;
+	gr->indices.size = 0;
 }
 
 static void
@@ -1015,14 +1035,14 @@ gl_renderer_repaint_output(struct weston_output *output,
 	/* if debugging, redraw everything outside the damage to clean up
 	 * debug lines from the previous draw on this buffer:
 	 */
-	if (compositor->fan_debug) {
+	if (gr->fan_debug) {
 		pixman_region32_t undamaged;
 		pixman_region32_init(&undamaged);
 		pixman_region32_subtract(&undamaged, &output->region,
 					 output_damage);
-		compositor->fan_debug = 0;
+		gr->fan_debug = 0;
 		repaint_surfaces(output, &undamaged);
-		compositor->fan_debug = 1;
+		gr->fan_debug = 1;
 		pixman_region32_fini(&undamaged);
 	}
 
@@ -1088,7 +1108,7 @@ gl_renderer_flush_damage(struct weston_surface *surface)
 {
 	struct gl_renderer *gr = get_renderer(surface->compositor);
 	struct gl_surface_state *gs = get_surface_state(surface);
-	struct wl_buffer *buffer = gs->buffer_ref.buffer;
+	struct weston_buffer *buffer = gs->buffer_ref.buffer;
 
 #ifdef GL_UNPACK_ROW_LENGTH
 	pixman_box32_t *rectangles;
@@ -1119,7 +1139,7 @@ gl_renderer_flush_damage(struct weston_surface *surface)
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT,
 			     gs->pitch, buffer->height, 0,
 			     GL_BGRA_EXT, GL_UNSIGNED_BYTE,
-			     wl_shm_buffer_get_data(buffer));
+			     wl_shm_buffer_get_data(buffer->shm_buffer));
 
 		goto done;
 	}
@@ -1127,7 +1147,17 @@ gl_renderer_flush_damage(struct weston_surface *surface)
 #ifdef GL_UNPACK_ROW_LENGTH
 	/* Mesa does not define GL_EXT_unpack_subimage */
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, gs->pitch);
-	data = wl_shm_buffer_get_data(buffer);
+	data = wl_shm_buffer_get_data(buffer->shm_buffer);
+
+	if (gs->needs_full_upload) {
+		glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+		glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+		glTexSubImage2D(GL_TEXTURE_2D, 0,
+				0, 0, gs->pitch, buffer->height,
+				GL_BGRA_EXT, GL_UNSIGNED_BYTE, data);
+		goto done;
+	}
+
 	rectangles = pixman_region32_rectangles(&gs->texture_damage, &n);
 	for (i = 0; i < n; i++) {
 		pixman_box32_t r;
@@ -1145,6 +1175,7 @@ gl_renderer_flush_damage(struct weston_surface *surface)
 done:
 	pixman_region32_fini(&gs->texture_damage);
 	pixman_region32_init(&gs->texture_damage);
+	gs->needs_full_upload = 0;
 
 	weston_buffer_reference(&gs->buffer_ref, NULL);
 }
@@ -1170,13 +1201,124 @@ ensure_textures(struct gl_surface_state *gs, int num_textures)
 }
 
 static void
-gl_renderer_attach(struct weston_surface *es, struct wl_buffer *buffer)
+gl_renderer_attach_shm(struct weston_surface *es, struct weston_buffer *buffer,
+		       struct wl_shm_buffer *shm_buffer)
 {
 	struct weston_compositor *ec = es->compositor;
 	struct gl_renderer *gr = get_renderer(ec);
 	struct gl_surface_state *gs = get_surface_state(es);
-	EGLint attribs[3], format;
+
+	buffer->shm_buffer = shm_buffer;
+	buffer->width = wl_shm_buffer_get_width(shm_buffer);
+	buffer->height = wl_shm_buffer_get_height(shm_buffer);
+
+	/* Only allocate a texture if it doesn't match existing one.
+	 * If a switch from DRM allocated buffer to a SHM buffer is
+	 * happening, we need to allocate a new texture buffer. */
+	if (wl_shm_buffer_get_stride(shm_buffer) / 4 != gs->pitch ||
+	    buffer->height != gs->height ||
+	    gs->buffer_type != BUFFER_TYPE_SHM) {
+		gs->pitch =  wl_shm_buffer_get_stride(shm_buffer) / 4;
+		gs->height = buffer->height;
+		gs->target = GL_TEXTURE_2D;
+		gs->buffer_type = BUFFER_TYPE_SHM;
+		gs->needs_full_upload = 1;
+
+		ensure_textures(gs, 1);
+		glBindTexture(GL_TEXTURE_2D, gs->textures[0]);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT,
+			     gs->pitch, buffer->height, 0,
+			     GL_BGRA_EXT, GL_UNSIGNED_BYTE, NULL);
+	}
+
+	if (wl_shm_buffer_get_format(shm_buffer) == WL_SHM_FORMAT_XRGB8888)
+		gs->shader = &gr->texture_shader_rgbx;
+	else
+		gs->shader = &gr->texture_shader_rgba;
+}
+
+static void
+gl_renderer_attach_egl(struct weston_surface *es, struct weston_buffer *buffer,
+		       uint32_t format)
+{
+	struct weston_compositor *ec = es->compositor;
+	struct gl_renderer *gr = get_renderer(ec);
+	struct gl_surface_state *gs = get_surface_state(es);
+	EGLint attribs[3];
 	int i, num_planes;
+
+	buffer->legacy_buffer = (struct wl_buffer *)buffer->resource;
+	gr->query_buffer(gr->egl_display, buffer->legacy_buffer,
+			 EGL_WIDTH, &buffer->width);
+	gr->query_buffer(gr->egl_display, buffer->legacy_buffer,
+			 EGL_HEIGHT, &buffer->height);
+
+	for (i = 0; i < gs->num_images; i++)
+		gr->destroy_image(gr->egl_display, gs->images[i]);
+	gs->num_images = 0;
+	gs->target = GL_TEXTURE_2D;
+	switch (format) {
+	case EGL_TEXTURE_RGB:
+	case EGL_TEXTURE_RGBA:
+	default:
+		num_planes = 1;
+		gs->shader = &gr->texture_shader_rgba;
+		break;
+	case EGL_TEXTURE_EXTERNAL_WL:
+		num_planes = 1;
+		gs->target = GL_TEXTURE_EXTERNAL_OES;
+		gs->shader = &gr->texture_shader_egl_external;
+		break;
+	case EGL_TEXTURE_Y_UV_WL:
+		num_planes = 2;
+		gs->shader = &gr->texture_shader_y_uv;
+		break;
+	case EGL_TEXTURE_Y_U_V_WL:
+		num_planes = 3;
+		gs->shader = &gr->texture_shader_y_u_v;
+		break;
+	case EGL_TEXTURE_Y_XUXV_WL:
+		num_planes = 2;
+		gs->shader = &gr->texture_shader_y_xuxv;
+		break;
+	}
+
+	ensure_textures(gs, num_planes);
+	for (i = 0; i < num_planes; i++) {
+		attribs[0] = EGL_WAYLAND_PLANE_WL;
+		attribs[1] = i;
+		attribs[2] = EGL_NONE;
+		gs->images[i] = gr->create_image(gr->egl_display,
+						 NULL,
+						 EGL_WAYLAND_BUFFER_WL,
+						 buffer->legacy_buffer,
+						 attribs);
+		if (!gs->images[i]) {
+			weston_log("failed to create img for plane %d\n", i);
+			continue;
+		}
+		gs->num_images++;
+
+		glActiveTexture(GL_TEXTURE0 + i);
+		glBindTexture(gs->target, gs->textures[i]);
+		gr->image_target_texture_2d(gs->target,
+					    gs->images[i]);
+	}
+
+	gs->pitch = buffer->width;
+	gs->height = buffer->height;
+	gs->buffer_type = BUFFER_TYPE_EGL;
+}
+
+static void
+gl_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
+{
+	struct weston_compositor *ec = es->compositor;
+	struct gl_renderer *gr = get_renderer(ec);
+	struct gl_surface_state *gs = get_surface_state(es);
+	struct wl_shm_buffer *shm_buffer;
+	EGLint format;
+	int i;
 
 	weston_buffer_reference(&gs->buffer_ref, buffer);
 
@@ -1188,79 +1330,22 @@ gl_renderer_attach(struct weston_surface *es, struct wl_buffer *buffer)
 		gs->num_images = 0;
 		glDeleteTextures(gs->num_textures, gs->textures);
 		gs->num_textures = 0;
+		gs->buffer_type = BUFFER_TYPE_NULL;
 		return;
 	}
 
-	if (wl_buffer_is_shm(buffer)) {
-		gs->pitch = wl_shm_buffer_get_stride(buffer) / 4;
-		gs->target = GL_TEXTURE_2D;
+	shm_buffer = wl_shm_buffer_get(buffer->resource);
 
-		ensure_textures(gs, 1);
-		glBindTexture(GL_TEXTURE_2D, gs->textures[0]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT,
-			     gs->pitch, buffer->height, 0,
-			     GL_BGRA_EXT, GL_UNSIGNED_BYTE, NULL);
-		if (wl_shm_buffer_get_format(buffer) == WL_SHM_FORMAT_XRGB8888)
-			gs->shader = &gr->texture_shader_rgbx;
-		else
-			gs->shader = &gr->texture_shader_rgba;
-	} else if (gr->query_buffer(gr->egl_display, buffer,
-				    EGL_TEXTURE_FORMAT, &format)) {
-		for (i = 0; i < gs->num_images; i++)
-			gr->destroy_image(gr->egl_display, gs->images[i]);
-		gs->num_images = 0;
-		gs->target = GL_TEXTURE_2D;
-		switch (format) {
-		case EGL_TEXTURE_RGB:
-		case EGL_TEXTURE_RGBA:
-		default:
-			num_planes = 1;
-			gs->shader = &gr->texture_shader_rgba;
-			break;
-		case EGL_TEXTURE_EXTERNAL_WL:
-			num_planes = 1;
-			gs->target = GL_TEXTURE_EXTERNAL_OES;
-			gs->shader = &gr->texture_shader_egl_external;
-			break;
-		case EGL_TEXTURE_Y_UV_WL:
-			num_planes = 2;
-			gs->shader = &gr->texture_shader_y_uv;
-			break;
-		case EGL_TEXTURE_Y_U_V_WL:
-			num_planes = 3;
-			gs->shader = &gr->texture_shader_y_u_v;
-			break;
-		case EGL_TEXTURE_Y_XUXV_WL:
-			num_planes = 2;
-			gs->shader = &gr->texture_shader_y_xuxv;
-			break;
-		}
-
-		ensure_textures(gs, num_planes);
-		for (i = 0; i < num_planes; i++) {
-			attribs[0] = EGL_WAYLAND_PLANE_WL;
-			attribs[1] = i;
-			attribs[2] = EGL_NONE;
-			gs->images[i] = gr->create_image(gr->egl_display,
-							 NULL,
-							 EGL_WAYLAND_BUFFER_WL,
-							 buffer, attribs);
-			if (!gs->images[i]) {
-				weston_log("failed to create img for plane %d\n", i);
-				continue;
-			}
-			gs->num_images++;
-
-			glActiveTexture(GL_TEXTURE0 + i);
-			glBindTexture(gs->target, gs->textures[i]);
-			gr->image_target_texture_2d(gs->target,
-						    gs->images[i]);
-		}
-
-		gs->pitch = buffer->width;
-	} else {
+	if (shm_buffer)
+		gl_renderer_attach_shm(es, buffer, shm_buffer);
+	else if (gr->query_buffer(gr->egl_display,
+				  (struct wl_buffer *)buffer->resource,
+				  EGL_TEXTURE_FORMAT, &format))
+		gl_renderer_attach_egl(es, buffer, format);
+	else {
 		weston_log("unhandled buffer type!\n");
 		weston_buffer_reference(&gs->buffer_ref, NULL);
+		gs->buffer_type = BUFFER_TYPE_NULL;
 	}
 }
 
@@ -1446,14 +1531,13 @@ compile_shader(GLenum type, int count, const char **sources)
 }
 
 static int
-shader_init(struct gl_shader *shader, struct weston_compositor *ec,
+shader_init(struct gl_shader *shader, struct gl_renderer *renderer,
 		   const char *vertex_source, const char *fragment_source)
 {
 	char msg[512];
 	GLint status;
 	int count;
 	const char *sources[3];
-	struct gl_renderer *renderer = get_renderer(ec);
 
 	shader->vertex_shader =
 		compile_shader(GL_VERTEX_SHADER, 1, &vertex_source);
@@ -1708,6 +1792,10 @@ gl_renderer_destroy(struct weston_compositor *ec)
 	eglTerminate(gr->egl_display);
 	eglReleaseThread();
 
+	wl_array_release(&gr->vertices);
+	wl_array_release(&gr->indices);
+	wl_array_release(&gr->vtxcnt);
+
 	free(gr);
 }
 
@@ -1813,6 +1901,8 @@ gl_renderer_create(struct weston_compositor *ec, EGLNativeDisplayType display,
 	}
 
 	ec->renderer = &gr->base;
+	ec->capabilities |= WESTON_CAP_ROTATION_ANY;
+	ec->capabilities |= WESTON_CAP_CAPTURE_YFLIP;
 
 	return 0;
 
@@ -1833,34 +1923,35 @@ compile_shaders(struct weston_compositor *ec)
 {
 	struct gl_renderer *gr = get_renderer(ec);
 
-	if (shader_init(&gr->texture_shader_rgba, ec,
-			     vertex_shader, texture_fragment_shader_rgba) < 0)
-		return -1;
-	if (shader_init(&gr->texture_shader_rgbx, ec,
-			     vertex_shader, texture_fragment_shader_rgbx) < 0)
-		return -1;
-	if (gr->has_egl_image_external &&
-			shader_init(&gr->texture_shader_egl_external, ec,
-				vertex_shader, texture_fragment_shader_egl_external) < 0)
-		return -1;
-	if (shader_init(&gr->texture_shader_y_uv, ec,
-			       vertex_shader, texture_fragment_shader_y_uv) < 0)
-		return -1;
-	if (shader_init(&gr->texture_shader_y_u_v, ec,
-			       vertex_shader, texture_fragment_shader_y_u_v) < 0)
-		return -1;
-	if (shader_init(&gr->texture_shader_y_xuxv, ec,
-			       vertex_shader, texture_fragment_shader_y_xuxv) < 0)
-		return -1;
-	if (shader_init(&gr->solid_shader, ec,
-			     vertex_shader, solid_fragment_shader) < 0)
-		return -1;
+	gr->texture_shader_rgba.vertex_source = vertex_shader;
+	gr->texture_shader_rgba.fragment_source = texture_fragment_shader_rgba;
+
+	gr->texture_shader_rgbx.vertex_source = vertex_shader;
+	gr->texture_shader_rgbx.fragment_source = texture_fragment_shader_rgbx;
+
+	gr->texture_shader_egl_external.vertex_source = vertex_shader;
+	gr->texture_shader_egl_external.fragment_source =
+		texture_fragment_shader_egl_external;
+
+	gr->texture_shader_y_uv.vertex_source = vertex_shader;
+	gr->texture_shader_y_uv.fragment_source = texture_fragment_shader_y_uv;
+
+	gr->texture_shader_y_u_v.vertex_source = vertex_shader;
+	gr->texture_shader_y_u_v.fragment_source =
+		texture_fragment_shader_y_u_v;
+
+	gr->texture_shader_y_u_v.vertex_source = vertex_shader;
+	gr->texture_shader_y_xuxv.fragment_source =
+		texture_fragment_shader_y_xuxv;
+
+	gr->solid_shader.vertex_source = vertex_shader;
+	gr->solid_shader.fragment_source = solid_fragment_shader;
 
 	return 0;
 }
 
 static void
-fragment_debug_binding(struct wl_seat *seat, uint32_t time, uint32_t key,
+fragment_debug_binding(struct weston_seat *seat, uint32_t time, uint32_t key,
 		       void *data)
 {
 	struct weston_compositor *ec = data;
@@ -1877,14 +1968,23 @@ fragment_debug_binding(struct wl_seat *seat, uint32_t time, uint32_t key,
 	shader_release(&gr->texture_shader_y_xuxv);
 	shader_release(&gr->solid_shader);
 
-	compile_shaders(ec);
-
 	/* Force use_shader() to call glUseProgram(), since we need to use
 	 * the recompiled version of the shader. */
 	gr->current_shader = NULL;
 
 	wl_list_for_each(output, &ec->output_list, link)
 		weston_output_damage(output);
+}
+
+static void
+fan_debug_repaint_binding(struct weston_seat *seat, uint32_t time, uint32_t key,
+		      void *data)
+{
+	struct weston_compositor *compositor = data;
+	struct gl_renderer *gr = get_renderer(compositor);
+
+	gr->fan_debug = !gr->fan_debug;
+	weston_compositor_damage_all(compositor);
 }
 
 static int
@@ -1986,6 +2086,8 @@ gl_renderer_setup(struct weston_compositor *ec, EGLSurface egl_surface)
 
 	weston_compositor_add_debug_binding(ec, KEY_S,
 					    fragment_debug_binding, ec);
+	weston_compositor_add_debug_binding(ec, KEY_F,
+					    fan_debug_repaint_binding, ec);
 
 	weston_log("GL ES 2 renderer features:\n");
 	weston_log_continue(STAMP_SPACE "read-back format: %s\n",
