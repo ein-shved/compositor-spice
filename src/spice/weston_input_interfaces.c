@@ -87,9 +87,11 @@ weston_mouse_motion (SpiceMouseInstance *sin, int dx, int dy, int dz,
 
     dprint (3, "called. delta: (%d,%d,%d), buttons: %x",
             dx,dy,dz,buttons_state);
-    if (!c->core_seat.has_pointer) {
+    /*if (!c->core_seat.has_pointer) {
         return;
     }
+* look like it depricated
+    */
     notify_motion(&c->core_seat, weston_compositor_get_time(),
             DEFAULT_MOVEMENT_STEP_DISTANCE*dx, 
             DEFAULT_MOVEMENT_STEP_DISTANCE*dy );
@@ -107,9 +109,9 @@ weston_mouse_buttons (SpiceMouseInstance *sin, uint32_t buttons_state )
     struct weston_spice_mouse *mouse = container_of(sin, struct weston_spice_mouse, sin);
     struct spice_compositor *c = mouse->c;
 
-    if (!c->core_seat.has_pointer) {
+    /*if (!c->core_seat.has_pointer) {
         return;
-    }
+    }*/
     dprint (3, "called. Buttons: %x", buttons_state);
     weston_mouse_button_notify (c, mouse, buttons_state);
 }
@@ -186,9 +188,9 @@ weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
     struct spice_compositor *c = kbd->c;
     enum wl_keyboard_key_state state;
     
-    if (!c->core_seat.has_pointer) {
+    /*if (!c->core_seat.has_pointer) {
         return;
-    }
+    }*/
     if (frag == 224) {
         dprint (3, "escape called: %x", frag);
         kbd->escape = frag;

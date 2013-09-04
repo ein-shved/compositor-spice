@@ -23,11 +23,10 @@
 #ifndef COMPOSITOR_SPICE_H
 #define COMPOSITOR_SPICE_H
 
+#include <assert.h>
 #include <spice.h>
 
-#include <weston/compositor.h>
-#include <assert.h>
-
+#include "../compositor.h"
 #include "compositor-spice-conf.h"
 #include "weston_spice_interfaces.h"
 

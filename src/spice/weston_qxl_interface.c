@@ -211,16 +211,18 @@ weston_spice_get_cursor_command(QXLInstance *sin, struct QXLCommandExt *ext)
     spice_compositor_t *c = container_of(sin, spice_compositor_t, display_sin);
     static int set = TRUE;
     struct cursor_cmd *cmd;
-    static int x = 0, y = 0;
-    struct wl_pointer *pointer;
+    static wl_fixed_t x = 0, y = 0;
+    struct weston_pointer *pointer;
 
     //Not used for now.
     return FALSE;
     
-    if (!c->core_seat.has_pointer) {
+    /*if (!c->core_seat.has_pointer) {
         return FALSE;
     }
-    pointer = c->core_seat.seat.pointer;
+* looks like it depricated
+    */
+    pointer = c->core_seat.pointer;
 
     if ( !set && 
             x == pointer->x &&

@@ -22,17 +22,18 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 
-#include <weston/compositor.h>
 #include <spice.h>
 #include <spice/qxl_dev.h>
 #include <spice/macros.h>
-#include <sys/time.h>
 
+#include "../compositor.h"
 #include "../pixman-renderer.h"
 #include "compositor-spice.h"
 #include "weston_basic_event_loop.h"
 #include "weston_qxl_commands.h"
+
 
 struct spice_server_ops {
     const char* addr;
@@ -180,7 +181,7 @@ spice_create_output ( struct spice_compositor *c,
 	output->base.model      = "none";
 
     weston_output_init ( &output->base, &c->base,
-                x, y, width, height, transform );
+                x, y, width, height, transform, 1 );
     if( pixman_renderer_output_create (&output->base) <0) {
         goto err_pixman_create;
     }
@@ -238,7 +239,7 @@ static int
 weston_spice_input_init ( struct spice_compositor *c, 
         const struct spice_server_ops *ops )
 {
-    weston_seat_init (&c->core_seat, &c->base);
+    weston_seat_init (&c->core_seat, &c->base, "default");
     
     //mouse interface
     weston_spice_mouse_init (c);
@@ -281,7 +282,8 @@ spice_restore (struct weston_compositor *compositor_base)
 static struct spice_compositor *
 spice_compositor_create ( struct wl_display *display, 
         const struct spice_server_ops *ops, 
-        int *argc, char *argv[], const char *config_file)
+        int *argc, char *argv[], 
+        struct weston_config *config )
 {
     struct spice_compositor *c;
 
@@ -291,8 +293,7 @@ spice_compositor_create ( struct wl_display *display,
     }
     memset (c, 0, sizeof *c);
 
-    if (weston_compositor_init (&c->base, display, argc, argv, 
-        config_file) < 0) 
+    if (weston_compositor_init (&c->base, display, argc, argv, config) < 0) 
     {
         goto err_weston_init;
     }
@@ -337,7 +338,7 @@ err_malloc_compositor:
 
 WL_EXPORT struct weston_compositor *
 backend_init( struct wl_display *display, int *argc, char *argv[],
-        const char *config_file)
+        struct weston_config *config)
 {
     struct spice_compositor *c;
     struct spice_server_ops ops = {
@@ -356,7 +357,7 @@ backend_init( struct wl_display *display, int *argc, char *argv[],
     parse_options (spice_options, ARRAY_LENGTH (spice_options), argc, argv);
     weston_log ("Initialising spice compositor\n");
     c = spice_compositor_create ( display, &ops,
-            argc, argv, config_file);
+            argc, argv, config);
     if (c == NULL ) {
         return NULL;
     }

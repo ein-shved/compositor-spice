@@ -216,7 +216,7 @@ if test x$enable_spice_compositor = xyes; then
     ],
   )
   spice_save_LIBS=$LIBS
-  pice_save_CFLAGS=$CFLAGS
+  spice_save_CFLAGS=$CFLAGS
   CFLAGS=$SPICE_CFLAGS
   LIBS=$SPICE_LIBS
   LIBS=$spice_save_LIBS
