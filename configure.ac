@@ -234,6 +234,32 @@ if test "x$cairo_modules" = "xcairo-glesv2"; then
 AC_DEFINE([USE_CAIRO_GLESV2], [1], [Use the GLESv2 GL cairo backend])
 fi
 
+AC_ARG_ENABLE(spice-compositor, [  --enable-spice-compositor],,
+	      enable_spice_compositor=yes)
+AM_CONDITIONAL(ENABLE_SPICE_COMPOSITOR, test x$enable_spice_compositor = xyes)
+if test x$enable_spice_compositor = xyes; then
+  PKG_CHECK_MODULES([SPICE], 
+    [   
+      spice-server
+      spice-protocol
+    ] ,
+    [
+      AC_SUBST(SPICE_CFLAGS)
+      AC_SUBST(SPICE_LIBS)
+    ],
+  )
+  spice_save_LIBS=$LIBS
+  spice_save_CFLAGS=$CFLAGS
+  CFLAGS=$SPICE_CFLAGS
+  LIBS=$SPICE_LIBS
+  LIBS=$spice_save_LIBS
+  CFLAGS=$spice_save_CFLAGS
+
+  AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
+fi
+
+
+
 PKG_CHECK_MODULES(PIXMAN, [pixman-1])
 PKG_CHECK_MODULES(PNG, [libpng])
 PKG_CHECK_MODULES(WEBP, [libwebp], [have_webp=yes], [have_webp=no])
@@ -454,7 +480,8 @@ AC_CONFIG_FILES([Makefile
 		 data/Makefile
 		 protocol/Makefile
 		 man/Makefile
-		 tests/Makefile])
+		 tests/Makefile
+         src/spice/Makefile])
 AC_OUTPUT
 
 AC_MSG_RESULT([
