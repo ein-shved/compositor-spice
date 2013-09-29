@@ -506,6 +506,7 @@ AC_MSG_RESULT([
 	RPI Compositor			${enable_rpi_compositor}
 	FBDEV Compositor		${enable_fbdev_compositor}
 	RDP Compositor			${enable_rdp_compositor}
+	Spice remote compositor		${enable_spice_compositor}
 
 	Raspberry Pi BCM headers	${have_bcm_host}
 

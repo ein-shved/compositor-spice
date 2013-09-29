@@ -3,6 +3,7 @@ AM_CPPFLAGS =					\
 	-I$(top_builddir)/src			\
 	-DDATADIR='"$(datadir)"'		\
 	-DMODULEDIR='"$(moduledir)"'		\
+    -DIN_WESTON                     \
 	-DLIBEXECDIR='"$(libexecdir)"'		\
 	-DSPICE_PATH='"@SPICE_PATH@"'
 
@@ -30,5 +31,3 @@ spice_backend_la_SOURCES =      \
     weston_qxl_interface.c      \
     weston_qxl_commands.h       \
     weston_qxl_commands.c
-
-@wayland_scanner_rules@
