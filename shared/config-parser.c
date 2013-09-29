@@ -41,194 +41,6 @@
 	const __typeof__( ((type *)0)->member ) *__mptr = (ptr);	\
 	(type *)( (char *)__mptr - offsetof(type,member) );})
 
-static int
-handle_key(const struct config_key *key, const char *value)
-{
-	char *end, *s;
-	int i, len;
-	unsigned int ui;
-	
-	switch (key->type) {
-	case CONFIG_KEY_INTEGER:
-		i = strtol(value, &end, 0);
-		if (*end != '\n') {
-			fprintf(stderr, "invalid integer: %s\n", value);
-			return -1;
-		}
-		*(int *)key->data = i;
-		return 0;
-
-	case CONFIG_KEY_UNSIGNED_INTEGER:
-		ui = strtoul(value, &end, 0);
-		if (*end != '\n') {
-			fprintf(stderr, "invalid integer: %s\n", value);
-			return -1;
-		}
-		*(unsigned int *)key->data = ui;
-		return 0;
-
-	case CONFIG_KEY_STRING:
-		len = strlen(value);
-		while (len > 0 && isspace(value[len - 1]))
-			len--;
-		s = malloc(len + 1);
-		if (s == NULL)
-			return -1;
-		memcpy(s, value, len);
-		s[len] = '\0';
-		*(char **)key->data = s;
-		return 0;
-
-	case CONFIG_KEY_BOOLEAN:
-		if (strcmp(value, "false\n") == 0)
-			*(int *)key->data = 0;
-		else if (strcmp(value, "true\n") == 0)
-			*(int *)key->data = 1;
-		else {
-			fprintf(stderr, "invalid bool: %s\n", value);
-			return -1;
-		}
-		return 0;
-
-	default:
-		assert(0);
-		break;
-	}
-
-	return -1;
-}
-
-int
-parse_config_file(int fd,
-		  const struct config_section *sections, int num_sections,
-		  void *data)
-{
-	FILE *fp;
-	char line[512], *p;
-	const struct config_section *current = NULL;
-	int i;
-
-	if (fd == -1)
-		return -1;
-
-	fp = fdopen(dup(fd), "r");
-	if (fp == NULL) {
-            perror("couldn't open config file");
-		return -1;
-	}
-
-	rewind(fp);
-
-	while (fgets(line, sizeof line, fp)) {
-		if (line[0] == '#' || line[0] == '\n') {
-			continue;
-		} if (line[0] == '[') {
-			p = strchr(&line[1], ']');
-			if (!p || p[1] != '\n') {
-				fprintf(stderr, "malformed "
-					"section header: %s\n", line);
-				fclose(fp);
-				return -1;
-			}
-			if (current && current->done)
-				current->done(data);
-			p[0] = '\0';
-			for (i = 0; i < num_sections; i++) {
-				if (strcmp(sections[i].name, &line[1]) == 0) {
-					current = &sections[i];
-					break;
-				}
-			}
-			if (i == num_sections)
-				current = NULL;
-		} else if (p = strchr(line, '='), p != NULL) {
-			if (current == NULL)
-				continue;
-			p[0] = '\0';
-			for (i = 0; i < current->num_keys; i++) {
-				if (strcmp(current->keys[i].name, line) == 0) {
-					if (handle_key(&current->keys[i], &p[1]) < 0) {
-						fclose(fp);
-						return -1;
-					}
-					break;
-				}
-			}
-		} else {
-			fprintf(stderr, "malformed config line: %s\n", line);
-			fclose(fp);
-			return -1;
-		}
-	}
-
-	if (current && current->done)
-		current->done(data);
-
-	fclose(fp);
-
-	return 0;
-}
-
-int
-open_config_file(const char *name)
-{
-	const char *config_dir  = getenv("XDG_CONFIG_HOME");
-	const char *home_dir	= getenv("HOME");
-	const char *config_dirs = getenv("XDG_CONFIG_DIRS");
-	char path[PATH_MAX];
-	const char *p, *next;
-	int fd;
-
-	/* Precedence is given to config files in the home directory,
-	 * and then to directories listed in XDG_CONFIG_DIRS and
-	 * finally to the current working directory. */
-
-	/* $XDG_CONFIG_HOME */
-	if (config_dir) {
-		snprintf(path, sizeof path, "%s/%s", config_dir, name);
-		fd = open(path, O_RDONLY | O_CLOEXEC);
-		if (fd >= 0)
-			return fd;
-	}
-
-	/* $HOME/.config */
-	if (home_dir) {
-		snprintf(path, sizeof path, "%s/.config/%s", home_dir, name);
-		fd = open(path, O_RDONLY | O_CLOEXEC);
-		if (fd >= 0)
-			return fd;
-	}
-
-	/* For each $XDG_CONFIG_DIRS: weston/<config_file> */
-	if (!config_dirs)
-		config_dirs = "/etc/xdg";  /* See XDG base dir spec. */
-
-	for (p = config_dirs; *p != '\0'; p = next) {
-		next = strchrnul(p, ':');
-		snprintf(path, sizeof path,
-			 "%.*s/weston/%s", (int)(next - p), p, name);
-		fd = open(path, O_RDONLY | O_CLOEXEC);
-		if (fd >= 0)
-			return fd;
-
-		if (*next == ':')
-			next++;
-	}
-
-	/* Current working directory. */
-	snprintf(path, sizeof path, "./%s", name);
-	fd = open(path, O_RDONLY | O_CLOEXEC);
-
-	if (fd >= 0)
-		fprintf(stderr,
-			"using config in current working directory: %s\n",
-			path);
-	else
-		fprintf(stderr, "config file \"%s\" not found.\n", name);
-
-	return fd;
-}
-
 struct weston_config_entry {
 	char *key;
 	char *value;
@@ -243,7 +55,65 @@ struct weston_config_section {
 
 struct weston_config {
 	struct wl_list section_list;
+	char path[PATH_MAX];
 };
+
+static int
+open_config_file(struct weston_config *c, const char *name)
+{
+	const char *config_dir  = getenv("XDG_CONFIG_HOME");
+	const char *home_dir	= getenv("HOME");
+	const char *config_dirs = getenv("XDG_CONFIG_DIRS");
+	const char *p, *next;
+	int fd;
+
+	if (name[0] == '/') {
+		snprintf(c->path, sizeof c->path, "%s", name);
+		return open(name, O_RDONLY | O_CLOEXEC);
+	}
+
+	/* Precedence is given to config files in the home directory,
+	 * and then to directories listed in XDG_CONFIG_DIRS and
+	 * finally to the current working directory. */
+
+	/* $XDG_CONFIG_HOME */
+	if (config_dir) {
+		snprintf(c->path, sizeof c->path, "%s/%s", config_dir, name);
+		fd = open(c->path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0)
+			return fd;
+	}
+
+	/* $HOME/.config */
+	if (home_dir) {
+		snprintf(c->path, sizeof c->path,
+			 "%s/.config/%s", home_dir, name);
+		fd = open(c->path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0)
+			return fd;
+	}
+
+	/* For each $XDG_CONFIG_DIRS: weston/<config_file> */
+	if (!config_dirs)
+		config_dirs = "/etc/xdg";  /* See XDG base dir spec. */
+
+	for (p = config_dirs; *p != '\0'; p = next) {
+		next = strchrnul(p, ':');
+		snprintf(c->path, sizeof c->path,
+			 "%.*s/weston/%s", (int)(next - p), p, name);
+		fd = open(c->path, O_RDONLY | O_CLOEXEC);
+		if (fd >= 0)
+			return fd;
+
+		if (*next == ':')
+			next++;
+	}
+
+	/* Current working directory. */
+	snprintf(c->path, sizeof c->path, "./%s", name);
+
+	return open(c->path, O_RDONLY | O_CLOEXEC);
+}
 
 static struct weston_config_entry *
 config_section_get_entry(struct weston_config_section *section,
@@ -440,13 +310,13 @@ section_add_entry(struct weston_config_section *section,
 }
 
 struct weston_config *
-weston_config_parse(int fd)
+weston_config_parse(const char *name)
 {
 	FILE *fp;
 	char line[512], *p;
 	struct weston_config *config;
 	struct weston_config_section *section = NULL;
-	int i;
+	int i, fd;
 
 	config = malloc(sizeof *config);
 	if (config == NULL)
@@ -454,13 +324,17 @@ weston_config_parse(int fd)
 
 	wl_list_init(&config->section_list);
 
-	fp = fdopen(dup(fd), "r");
-	if (fp == NULL) {
+	fd = open_config_file(config, name);
+	if (fd == -1) {
 		free(config);
 		return NULL;
 	}
 
-	rewind(fp);
+	fp = fdopen(fd, "r");
+	if (fp == NULL) {
+		free(config);
+		return NULL;
+	}
 
 	while (fgets(line, sizeof line, fp)) {
 		switch (line[0]) {
@@ -506,6 +380,12 @@ weston_config_parse(int fd)
 	fclose(fp);
 
 	return config;
+}
+
+const char *
+weston_config_get_full_path(struct weston_config *config)
+{
+	return config == NULL ? NULL : config->path;
 }
 
 int

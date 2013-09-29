@@ -28,6 +28,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <mtdev.h>
+#include <assert.h>
 
 #include "compositor.h"
 #include "evdev.h"
@@ -64,177 +65,6 @@ evdev_led_update(struct evdev_device *device, enum weston_led leds)
 	(void)i; /* no, we really don't care about the return value */
 }
 
-static inline void
-evdev_process_key(struct evdev_device *device, struct input_event *e, int time)
-{
-	/* ignore kernel key repeat */
-	if (e->value == 2)
-		return;
-
-	switch (e->code) {
-	case BTN_LEFT:
-	case BTN_RIGHT:
-	case BTN_MIDDLE:
-	case BTN_SIDE:
-	case BTN_EXTRA:
-	case BTN_FORWARD:
-	case BTN_BACK:
-	case BTN_TASK:
-		notify_button(device->seat,
-			      time, e->code,
-			      e->value ? WL_POINTER_BUTTON_STATE_PRESSED :
-					 WL_POINTER_BUTTON_STATE_RELEASED);
-		break;
-
-	case BTN_TOUCH:
-		if (e->value == 0 && !device->is_mt)
-			notify_touch(device->seat, time, 0, 0, 0,
-				     WL_TOUCH_UP);
-		break;
-	default:
-		notify_key(device->seat,
-			   time, e->code,
-			   e->value ? WL_KEYBOARD_KEY_STATE_PRESSED :
-				      WL_KEYBOARD_KEY_STATE_RELEASED,
-			   STATE_UPDATE_AUTOMATIC);
-		break;
-	}
-}
-
-static void
-evdev_process_touch(struct evdev_device *device, struct input_event *e)
-{
-	const int screen_width = device->output->current->width;
-	const int screen_height = device->output->current->height;
-
-	switch (e->code) {
-	case ABS_MT_SLOT:
-		device->mt.slot = e->value;
-		break;
-	case ABS_MT_TRACKING_ID:
-		if (e->value >= 0)
-			device->pending_events |= EVDEV_ABSOLUTE_MT_DOWN;
-		else
-			device->pending_events |= EVDEV_ABSOLUTE_MT_UP;
-		break;
-	case ABS_MT_POSITION_X:
-		device->mt.x[device->mt.slot] =
-			(e->value - device->abs.min_x) * screen_width /
-			(device->abs.max_x - device->abs.min_x);
-		device->pending_events |= EVDEV_ABSOLUTE_MT_MOTION;
-		break;
-	case ABS_MT_POSITION_Y:
-		device->mt.y[device->mt.slot] =
-			(e->value - device->abs.min_y) * screen_height /
-			(device->abs.max_y - device->abs.min_y);
-		device->pending_events |= EVDEV_ABSOLUTE_MT_MOTION;
-		break;
-	}
-}
-
-static inline void
-evdev_process_absolute_motion(struct evdev_device *device,
-			      struct input_event *e)
-{
-	const int screen_width = device->output->current->width;
-	const int screen_height = device->output->current->height;
-
-	switch (e->code) {
-	case ABS_X:
-		device->abs.x =
-			(e->value - device->abs.min_x) * screen_width /
-			(device->abs.max_x - device->abs.min_x);
-		device->pending_events |= EVDEV_ABSOLUTE_MOTION;
-		break;
-	case ABS_Y:
-		device->abs.y =
-			(e->value - device->abs.min_y) * screen_height /
-			(device->abs.max_y - device->abs.min_y);
-		device->pending_events |= EVDEV_ABSOLUTE_MOTION;
-		break;
-	}
-}
-
-static inline void
-evdev_process_relative(struct evdev_device *device,
-		       struct input_event *e, uint32_t time)
-{
-	switch (e->code) {
-	case REL_X:
-		device->rel.dx += wl_fixed_from_int(e->value);
-		device->pending_events |= EVDEV_RELATIVE_MOTION;
-		break;
-	case REL_Y:
-		device->rel.dy += wl_fixed_from_int(e->value);
-		device->pending_events |= EVDEV_RELATIVE_MOTION;
-		break;
-	case REL_WHEEL:
-		switch (e->value) {
-		case -1:
-			/* Scroll down */
-		case 1:
-			/* Scroll up */
-			notify_axis(device->seat,
-				    time,
-				    WL_POINTER_AXIS_VERTICAL_SCROLL,
-				    -1 * e->value * DEFAULT_AXIS_STEP_DISTANCE);
-			break;
-		default:
-			break;
-		}
-		break;
-	case REL_HWHEEL:
-		switch (e->value) {
-		case -1:
-			/* Scroll left */
-		case 1:
-			/* Scroll right */
-			notify_axis(device->seat,
-				    time,
-				    WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-				    e->value * DEFAULT_AXIS_STEP_DISTANCE);
-			break;
-		default:
-			break;
-
-		}
-	}
-}
-
-static inline void
-evdev_process_absolute(struct evdev_device *device, struct input_event *e)
-{
-	if (device->is_mt) {
-		evdev_process_touch(device, e);
-	} else {
-		evdev_process_absolute_motion(device, e);
-	}
-}
-
-static int
-is_motion_event(struct input_event *e)
-{
-	switch (e->type) {
-	case EV_REL:
-		switch (e->code) {
-		case REL_X:
-		case REL_Y:
-			return 1;
-		}
-		break;
-	case EV_ABS:
-		switch (e->code) {
-		case ABS_X:
-		case ABS_Y:
-		case ABS_MT_POSITION_X:
-		case ABS_MT_POSITION_Y:
-			return 1;
-		}
-	}
-
-	return 0;
-}
-
 static void
 transform_absolute(struct evdev_device *device, int32_t *x, int32_t *y)
 {
@@ -254,64 +84,247 @@ transform_absolute(struct evdev_device *device, int32_t *x, int32_t *y)
 }
 
 static void
-evdev_flush_motion(struct evdev_device *device, uint32_t time)
+evdev_flush_pending_event(struct evdev_device *device, uint32_t time)
 {
-       struct weston_seat *master = device->seat;
-       wl_fixed_t x, y;
-       int32_t cx, cy;
-       int slot;
-
-       if (!(device->pending_events & EVDEV_SYN))
-		return;
+	struct weston_seat *master = device->seat;
+	wl_fixed_t x, y;
+	int32_t cx, cy;
+	int slot;
 
 	slot = device->mt.slot;
-	device->pending_events &= ~EVDEV_SYN;
-	if (device->pending_events & EVDEV_RELATIVE_MOTION) {
+
+	switch (device->pending_event) {
+	case EVDEV_NONE:
+		return;
+	case EVDEV_RELATIVE_MOTION:
 		notify_motion(master, time, device->rel.dx, device->rel.dy);
-		device->pending_events &= ~EVDEV_RELATIVE_MOTION;
 		device->rel.dx = 0;
 		device->rel.dy = 0;
-	}
-	if (device->pending_events & EVDEV_ABSOLUTE_MT_DOWN) {
+		goto handled;
+	case EVDEV_ABSOLUTE_MT_DOWN:
 		weston_output_transform_coordinate(device->output,
-						   device->mt.x[slot],
-						   device->mt.y[slot],
+						   device->mt.slots[slot].x,
+						   device->mt.slots[slot].y,
 						   &x, &y);
 		notify_touch(master, time,
-			     device->mt.slot, x, y, WL_TOUCH_DOWN);
-		device->pending_events &= ~EVDEV_ABSOLUTE_MT_DOWN;
-		device->pending_events &= ~EVDEV_ABSOLUTE_MT_MOTION;
-	}
-	if (device->pending_events & EVDEV_ABSOLUTE_MT_MOTION) {
+			     slot, x, y, WL_TOUCH_DOWN);
+		goto handled;
+	case EVDEV_ABSOLUTE_MT_MOTION:
 		weston_output_transform_coordinate(device->output,
-						   device->mt.x[slot],
-						   device->mt.y[slot],
+						   device->mt.slots[slot].x,
+						   device->mt.slots[slot].y,
 						   &x, &y);
 		notify_touch(master, time,
-			     device->mt.slot, x, y, WL_TOUCH_MOTION);
-		device->pending_events &= ~EVDEV_ABSOLUTE_MT_DOWN;
-		device->pending_events &= ~EVDEV_ABSOLUTE_MT_MOTION;
-	}
-	if (device->pending_events & EVDEV_ABSOLUTE_MT_UP) {
-		notify_touch(master, time, device->mt.slot, 0, 0,
+			     slot, x, y, WL_TOUCH_MOTION);
+		goto handled;
+	case EVDEV_ABSOLUTE_MT_UP:
+		notify_touch(master, time, slot, 0, 0,
 			     WL_TOUCH_UP);
-               device->pending_events &= ~EVDEV_ABSOLUTE_MT_UP;
-       }
-       if (device->pending_events & EVDEV_ABSOLUTE_MOTION) {
-               transform_absolute(device, &cx, &cy);
-               weston_output_transform_coordinate(device->output,
-                                                  cx, cy, &x, &y);
+		goto handled;
+	case EVDEV_ABSOLUTE_TOUCH_DOWN:
+		transform_absolute(device, &cx, &cy);
+		weston_output_transform_coordinate(device->output,
+						   cx, cy, &x, &y);
+		notify_touch(master, time, 0, x, y, WL_TOUCH_DOWN);
+		goto handled;
+	case EVDEV_ABSOLUTE_MOTION:
+		transform_absolute(device, &cx, &cy);
+		weston_output_transform_coordinate(device->output,
+						   cx, cy, &x, &y);
 
-               if (device->caps & EVDEV_TOUCH) {
-                       if (master->num_tp == 0)
-				notify_touch(master, time, 0,
-					     x, y, WL_TOUCH_DOWN);
-			else
-				notify_touch(master, time, 0,
-					     x, y, WL_TOUCH_MOTION);
-		} else
+		if (device->caps & EVDEV_TOUCH)
+			notify_touch(master, time, 0, x, y, WL_TOUCH_MOTION);
+		else
 			notify_motion_absolute(master, time, x, y);
-		device->pending_events &= ~EVDEV_ABSOLUTE_MOTION;
+		goto handled;
+	case EVDEV_ABSOLUTE_TOUCH_UP:
+		notify_touch(master, time, 0, 0, 0, WL_TOUCH_UP);
+		goto handled;
+	}
+
+	assert(0 && "Unknown pending event type");
+
+handled:
+	device->pending_event = EVDEV_NONE;
+}
+
+static void
+evdev_process_touch_button(struct evdev_device *device, int time, int value)
+{
+	if (device->pending_event != EVDEV_NONE &&
+	    device->pending_event != EVDEV_ABSOLUTE_MOTION)
+		evdev_flush_pending_event(device, time);
+
+	device->pending_event = (value ?
+				 EVDEV_ABSOLUTE_TOUCH_DOWN :
+				 EVDEV_ABSOLUTE_TOUCH_UP);
+}
+
+static inline void
+evdev_process_key(struct evdev_device *device, struct input_event *e, int time)
+{
+	/* ignore kernel key repeat */
+	if (e->value == 2)
+		return;
+
+	if (e->code == BTN_TOUCH) {
+		if (!device->is_mt)
+			evdev_process_touch_button(device, time, e->value);
+		return;
+	}
+
+	evdev_flush_pending_event(device, time);
+
+	switch (e->code) {
+	case BTN_LEFT:
+	case BTN_RIGHT:
+	case BTN_MIDDLE:
+	case BTN_SIDE:
+	case BTN_EXTRA:
+	case BTN_FORWARD:
+	case BTN_BACK:
+	case BTN_TASK:
+		notify_button(device->seat,
+			      time, e->code,
+			      e->value ? WL_POINTER_BUTTON_STATE_PRESSED :
+					 WL_POINTER_BUTTON_STATE_RELEASED);
+		break;
+
+	default:
+		notify_key(device->seat,
+			   time, e->code,
+			   e->value ? WL_KEYBOARD_KEY_STATE_PRESSED :
+				      WL_KEYBOARD_KEY_STATE_RELEASED,
+			   STATE_UPDATE_AUTOMATIC);
+		break;
+	}
+}
+
+static void
+evdev_process_touch(struct evdev_device *device,
+		    struct input_event *e,
+		    uint32_t time)
+{
+	const int screen_width = device->output->current_mode->width;
+	const int screen_height = device->output->current_mode->height;
+
+	switch (e->code) {
+	case ABS_MT_SLOT:
+		evdev_flush_pending_event(device, time);
+		device->mt.slot = e->value;
+		break;
+	case ABS_MT_TRACKING_ID:
+		if (device->pending_event != EVDEV_NONE &&
+		    device->pending_event != EVDEV_ABSOLUTE_MT_MOTION)
+			evdev_flush_pending_event(device, time);
+		if (e->value >= 0)
+			device->pending_event = EVDEV_ABSOLUTE_MT_DOWN;
+		else
+			device->pending_event = EVDEV_ABSOLUTE_MT_UP;
+		break;
+	case ABS_MT_POSITION_X:
+		device->mt.slots[device->mt.slot].x =
+			(e->value - device->abs.min_x) * screen_width /
+			(device->abs.max_x - device->abs.min_x);
+		if (device->pending_event == EVDEV_NONE)
+			device->pending_event = EVDEV_ABSOLUTE_MT_MOTION;
+		break;
+	case ABS_MT_POSITION_Y:
+		device->mt.slots[device->mt.slot].y =
+			(e->value - device->abs.min_y) * screen_height /
+			(device->abs.max_y - device->abs.min_y);
+		if (device->pending_event == EVDEV_NONE)
+			device->pending_event = EVDEV_ABSOLUTE_MT_MOTION;
+		break;
+	}
+}
+
+static inline void
+evdev_process_absolute_motion(struct evdev_device *device,
+			      struct input_event *e)
+{
+	const int screen_width = device->output->current_mode->width;
+	const int screen_height = device->output->current_mode->height;
+
+	switch (e->code) {
+	case ABS_X:
+		device->abs.x =
+			(e->value - device->abs.min_x) * screen_width /
+			(device->abs.max_x - device->abs.min_x);
+		if (device->pending_event == EVDEV_NONE)
+			device->pending_event = EVDEV_ABSOLUTE_MOTION;
+		break;
+	case ABS_Y:
+		device->abs.y =
+			(e->value - device->abs.min_y) * screen_height /
+			(device->abs.max_y - device->abs.min_y);
+		if (device->pending_event == EVDEV_NONE)
+			device->pending_event = EVDEV_ABSOLUTE_MOTION;
+		break;
+	}
+}
+
+static inline void
+evdev_process_relative(struct evdev_device *device,
+		       struct input_event *e, uint32_t time)
+{
+	switch (e->code) {
+	case REL_X:
+		if (device->pending_event != EVDEV_RELATIVE_MOTION)
+			evdev_flush_pending_event(device, time);
+		device->rel.dx += wl_fixed_from_int(e->value);
+		device->pending_event = EVDEV_RELATIVE_MOTION;
+		break;
+	case REL_Y:
+		if (device->pending_event != EVDEV_RELATIVE_MOTION)
+			evdev_flush_pending_event(device, time);
+		device->rel.dy += wl_fixed_from_int(e->value);
+		device->pending_event = EVDEV_RELATIVE_MOTION;
+		break;
+	case REL_WHEEL:
+		evdev_flush_pending_event(device, time);
+		switch (e->value) {
+		case -1:
+			/* Scroll down */
+		case 1:
+			/* Scroll up */
+			notify_axis(device->seat,
+				    time,
+				    WL_POINTER_AXIS_VERTICAL_SCROLL,
+				    -1 * e->value * DEFAULT_AXIS_STEP_DISTANCE);
+			break;
+		default:
+			break;
+		}
+		break;
+	case REL_HWHEEL:
+		evdev_flush_pending_event(device, time);
+		switch (e->value) {
+		case -1:
+			/* Scroll left */
+		case 1:
+			/* Scroll right */
+			notify_axis(device->seat,
+				    time,
+				    WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+				    e->value * DEFAULT_AXIS_STEP_DISTANCE);
+			break;
+		default:
+			break;
+
+		}
+	}
+}
+
+static inline void
+evdev_process_absolute(struct evdev_device *device,
+		       struct input_event *e,
+		       uint32_t time)
+{
+	if (device->is_mt) {
+		evdev_process_touch(device, e, time);
+	} else {
+		evdev_process_absolute_motion(device, e);
 	}
 }
 
@@ -326,13 +339,13 @@ fallback_process(struct evdev_dispatch *dispatch,
 		evdev_process_relative(device, event, time);
 		break;
 	case EV_ABS:
-		evdev_process_absolute(device, event);
+		evdev_process_absolute(device, event, time);
 		break;
 	case EV_KEY:
 		evdev_process_key(device, event, time);
 		break;
 	case EV_SYN:
-		device->pending_events |= EVDEV_SYN;
+		evdev_flush_pending_event(device, time);
 		break;
 	}
 }
@@ -368,23 +381,13 @@ evdev_process_events(struct evdev_device *device,
 	struct input_event *e, *end;
 	uint32_t time = 0;
 
-	device->pending_events = 0;
-
 	e = ev;
 	end = e + count;
 	for (e = ev; e < end; e++) {
 		time = e->time.tv_sec * 1000 + e->time.tv_usec / 1000;
 
-		/* we try to minimize the amount of notifications to be
-		 * forwarded to the compositor, so we accumulate motion
-		 * events and send as a bunch */
-		if (!is_motion_event(e))
-			evdev_flush_motion(device, time);
-
 		dispatch->interface->process(dispatch, device, e, time);
 	}
-
-	evdev_flush_motion(device, time);
 }
 
 static int
@@ -600,6 +603,7 @@ evdev_device_create(struct weston_seat *seat, const char *path, int device_fd)
 	device->rel.dy = 0;
 	device->dispatch = NULL;
 	device->fd = device_fd;
+	device->pending_event = EVDEV_NONE;
 	wl_list_init(&device->link);
 
 	ioctl(device->fd, EVIOCGNAME(sizeof(devname)), devname);

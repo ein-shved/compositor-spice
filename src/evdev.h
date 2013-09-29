@@ -31,12 +31,14 @@
 #define MAX_SLOTS 16
 
 enum evdev_event_type {
-	EVDEV_ABSOLUTE_MOTION = (1 << 0),
-	EVDEV_ABSOLUTE_MT_DOWN = (1 << 1),
-	EVDEV_ABSOLUTE_MT_MOTION = (1 << 2),
-	EVDEV_ABSOLUTE_MT_UP = (1 << 3),
-	EVDEV_RELATIVE_MOTION = (1 << 4),
-	EVDEV_SYN = (1 << 5),
+	EVDEV_NONE,
+	EVDEV_ABSOLUTE_TOUCH_DOWN,
+	EVDEV_ABSOLUTE_MOTION,
+	EVDEV_ABSOLUTE_TOUCH_UP,
+	EVDEV_ABSOLUTE_MT_DOWN,
+	EVDEV_ABSOLUTE_MT_MOTION,
+	EVDEV_ABSOLUTE_MT_UP,
+	EVDEV_RELATIVE_MOTION,
 };
 
 enum evdev_device_capability {
@@ -66,8 +68,9 @@ struct evdev_device {
 
 	struct {
 		int slot;
-		int32_t x[MAX_SLOTS];
-		int32_t y[MAX_SLOTS];
+		struct {
+			int32_t x, y;
+		} slots[MAX_SLOTS];
 	} mt;
 	struct mtdev *mtdev;
 
@@ -75,7 +78,7 @@ struct evdev_device {
 		wl_fixed_t dx, dy;
 	} rel;
 
-	enum evdev_event_type pending_events;
+	enum evdev_event_type pending_event;
 	enum evdev_device_capability caps;
 
 	int is_mt;

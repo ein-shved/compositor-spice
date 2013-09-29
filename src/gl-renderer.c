@@ -33,6 +33,7 @@
 #include <linux/input.h>
 
 #include "gl-renderer.h"
+#include "vertex-clipping.h"
 
 #include <EGL/eglext.h>
 #include "weston-egl-ext.h"
@@ -77,6 +78,7 @@ struct gl_surface_state {
 	enum buffer_type buffer_type;
 	int pitch; /* in pixels */
 	int height; /* in pixels */
+	int y_inverted;
 };
 
 struct gl_renderer {
@@ -178,270 +180,8 @@ gl_renderer_print_egl_error_state(void)
 		egl_error_string(code), (long)code);
 }
 
-struct polygon8 {
-	GLfloat x[8];
-	GLfloat y[8];
-	int n;
-};
-
-struct clip_context {
-	struct {
-		GLfloat x;
-		GLfloat y;
-	} prev;
-
-	struct {
-		GLfloat x1, y1;
-		GLfloat x2, y2;
-	} clip;
-
-	struct {
-		GLfloat *x;
-		GLfloat *y;
-	} vertices;
-};
-
-static GLfloat
-float_difference(GLfloat a, GLfloat b)
-{
-	/* http://www.altdevblogaday.com/2012/02/22/comparing-floating-point-numbers-2012-edition/ */
-	static const GLfloat max_diff = 4.0f * FLT_MIN;
-	static const GLfloat max_rel_diff = 4.0e-5;
-	GLfloat diff = a - b;
-	GLfloat adiff = fabsf(diff);
-
-	if (adiff <= max_diff)
-		return 0.0f;
-
-	a = fabsf(a);
-	b = fabsf(b);
-	if (adiff <= (a > b ? a : b) * max_rel_diff)
-		return 0.0f;
-
-	return diff;
-}
-
-/* A line segment (p1x, p1y)-(p2x, p2y) intersects the line x = x_arg.
- * Compute the y coordinate of the intersection.
- */
-static GLfloat
-clip_intersect_y(GLfloat p1x, GLfloat p1y, GLfloat p2x, GLfloat p2y,
-		 GLfloat x_arg)
-{
-	GLfloat a;
-	GLfloat diff = float_difference(p1x, p2x);
-
-	/* Practically vertical line segment, yet the end points have already
-	 * been determined to be on different sides of the line. Therefore
-	 * the line segment is part of the line and intersects everywhere.
-	 * Return the end point, so we use the whole line segment.
-	 */
-	if (diff == 0.0f)
-		return p2y;
-
-	a = (x_arg - p2x) / diff;
-	return p2y + (p1y - p2y) * a;
-}
-
-/* A line segment (p1x, p1y)-(p2x, p2y) intersects the line y = y_arg.
- * Compute the x coordinate of the intersection.
- */
-static GLfloat
-clip_intersect_x(GLfloat p1x, GLfloat p1y, GLfloat p2x, GLfloat p2y,
-		 GLfloat y_arg)
-{
-	GLfloat a;
-	GLfloat diff = float_difference(p1y, p2y);
-
-	/* Practically horizontal line segment, yet the end points have already
-	 * been determined to be on different sides of the line. Therefore
-	 * the line segment is part of the line and intersects everywhere.
-	 * Return the end point, so we use the whole line segment.
-	 */
-	if (diff == 0.0f)
-		return p2x;
-
-	a = (y_arg - p2y) / diff;
-	return p2x + (p1x - p2x) * a;
-}
-
-enum path_transition {
-	PATH_TRANSITION_OUT_TO_OUT = 0,
-	PATH_TRANSITION_OUT_TO_IN = 1,
-	PATH_TRANSITION_IN_TO_OUT = 2,
-	PATH_TRANSITION_IN_TO_IN = 3,
-};
-
-static void
-clip_append_vertex(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	*ctx->vertices.x++ = x;
-	*ctx->vertices.y++ = y;
-}
-
-static enum path_transition
-path_transition_left_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.x >= ctx->clip.x1) << 1) | (x >= ctx->clip.x1);
-}
-
-static enum path_transition
-path_transition_right_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.x < ctx->clip.x2) << 1) | (x < ctx->clip.x2);
-}
-
-static enum path_transition
-path_transition_top_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.y >= ctx->clip.y1) << 1) | (y >= ctx->clip.y1);
-}
-
-static enum path_transition
-path_transition_bottom_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.y < ctx->clip.y2) << 1) | (y < ctx->clip.y2);
-}
-
-static void
-clip_polygon_leftright(struct clip_context *ctx,
-		       enum path_transition transition,
-		       GLfloat x, GLfloat y, GLfloat clip_x)
-{
-	GLfloat yi;
-
-	switch (transition) {
-	case PATH_TRANSITION_IN_TO_IN:
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_IN_TO_OUT:
-		yi = clip_intersect_y(ctx->prev.x, ctx->prev.y, x, y, clip_x);
-		clip_append_vertex(ctx, clip_x, yi);
-		break;
-	case PATH_TRANSITION_OUT_TO_IN:
-		yi = clip_intersect_y(ctx->prev.x, ctx->prev.y, x, y, clip_x);
-		clip_append_vertex(ctx, clip_x, yi);
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_OUT_TO_OUT:
-		/* nothing */
-		break;
-	default:
-		assert(0 && "bad enum path_transition");
-	}
-
-	ctx->prev.x = x;
-	ctx->prev.y = y;
-}
-
-static void
-clip_polygon_topbottom(struct clip_context *ctx,
-		       enum path_transition transition,
-		       GLfloat x, GLfloat y, GLfloat clip_y)
-{
-	GLfloat xi;
-
-	switch (transition) {
-	case PATH_TRANSITION_IN_TO_IN:
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_IN_TO_OUT:
-		xi = clip_intersect_x(ctx->prev.x, ctx->prev.y, x, y, clip_y);
-		clip_append_vertex(ctx, xi, clip_y);
-		break;
-	case PATH_TRANSITION_OUT_TO_IN:
-		xi = clip_intersect_x(ctx->prev.x, ctx->prev.y, x, y, clip_y);
-		clip_append_vertex(ctx, xi, clip_y);
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_OUT_TO_OUT:
-		/* nothing */
-		break;
-	default:
-		assert(0 && "bad enum path_transition");
-	}
-
-	ctx->prev.x = x;
-	ctx->prev.y = y;
-}
-
-static void
-clip_context_prepare(struct clip_context *ctx, const struct polygon8 *src,
-		      GLfloat *dst_x, GLfloat *dst_y)
-{
-	ctx->prev.x = src->x[src->n - 1];
-	ctx->prev.y = src->y[src->n - 1];
-	ctx->vertices.x = dst_x;
-	ctx->vertices.y = dst_y;
-}
-
-static int
-clip_polygon_left(struct clip_context *ctx, const struct polygon8 *src,
-		  GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_left_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_leftright(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.x1);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_right(struct clip_context *ctx, const struct polygon8 *src,
-		   GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_right_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_leftright(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.x2);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_top(struct clip_context *ctx, const struct polygon8 *src,
-		 GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_top_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_topbottom(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.y1);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_bottom(struct clip_context *ctx, const struct polygon8 *src,
-		    GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_bottom_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_topbottom(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.y2);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #define min(a, b) (((a) > (b)) ? (b) : (a))
-#define clip(x, a, b)  min(max(x, a), b)
 
 /*
  * Compute the boundary vertices of the intersection of the global coordinate
@@ -456,7 +196,7 @@ static int
 calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 		pixman_box32_t *surf_rect, GLfloat *ex, GLfloat *ey)
 {
-	struct polygon8 polygon;
+
 	struct clip_context ctx;
 	int i, n;
 	GLfloat min_x, max_x, min_y, max_y;
@@ -499,11 +239,7 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 	 * vertices to the clip rect bounds:
 	 */
 	if (!es->transform.enabled) {
-		for (i = 0; i < surf.n; i++) {
-			ex[i] = clip(surf.x[i], ctx.clip.x1, ctx.clip.x2);
-			ey[i] = clip(surf.y[i], ctx.clip.y1, ctx.clip.y2);
-		}
-		return surf.n;
+		return clip_simple(&ctx, &surf, ex, ey);
 	}
 
 	/* Transformed case: use a general polygon clipping algorithm to
@@ -512,26 +248,7 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 	 * http://www.codeguru.com/cpp/misc/misc/graphics/article.php/c8965/Polygon-Clipping.htm
 	 * but without looking at any of that code.
 	 */
-	polygon.n = clip_polygon_left(&ctx, &surf, polygon.x, polygon.y);
-	surf.n = clip_polygon_right(&ctx, &polygon, surf.x, surf.y);
-	polygon.n = clip_polygon_top(&ctx, &surf, polygon.x, polygon.y);
-	surf.n = clip_polygon_bottom(&ctx, &polygon, surf.x, surf.y);
-
-	/* Get rid of duplicate vertices */
-	ex[0] = surf.x[0];
-	ey[0] = surf.y[0];
-	n = 1;
-	for (i = 1; i < surf.n; i++) {
-		if (float_difference(ex[n - 1], surf.x[i]) == 0.0f &&
-		    float_difference(ey[n - 1], surf.y[i]) == 0.0f)
-			continue;
-		ex[n] = surf.x[i];
-		ey[n] = surf.y[i];
-		n++;
-	}
-	if (float_difference(ex[n - 1], surf.x[0]) == 0.0f &&
-	    float_difference(ey[n - 1], surf.y[0]) == 0.0f)
-		n--;
+	n = clip_transformed(&ctx, &surf, ex, ey);
 
 	if (n < 3)
 		return 0;
@@ -599,7 +316,11 @@ texture_region(struct weston_surface *es, pixman_region32_t *region,
 				weston_surface_to_buffer_float(es, sx, sy,
 							       &bx, &by);
 				*(v++) = bx * inv_width;
-				*(v++) = by * inv_height;
+				if (gs->y_inverted) {
+					*(v++) = by * inv_height;
+				} else {
+					*(v++) = (gs->height - by) * inv_height;
+				}
 			}
 
 			vtxcnt[nvtx++] = n;
@@ -790,7 +511,7 @@ draw_surface(struct weston_surface *es, struct weston_output *output,
 	use_shader(gr, gs->shader);
 	shader_uniforms(gs->shader, es, output);
 
-	if (es->transform.enabled || output->zoom.active || output->scale != es->buffer_scale)
+	if (es->transform.enabled || output->zoom.active || output->current_scale != es->buffer_scale)
 		filter = GL_LINEAR;
 	else
 		filter = GL_NEAREST;
@@ -862,13 +583,13 @@ texture_border(struct weston_output *output)
 
 	x[0] = -gr->border.left;
 	x[1] = 0;
-	x[2] = output->current->width;
-	x[3] = output->current->width + gr->border.right;
+	x[2] = output->current_mode->width;
+	x[3] = output->current_mode->width + gr->border.right;
 
 	y[0] = -gr->border.top;
 	y[1] = 0;
-	y[2] = output->current->height;
-	y[3] = output->current->height + gr->border.bottom;
+	y[2] = output->current_mode->height;
+	y[3] = output->current_mode->height + gr->border.bottom;
 
 	u[0] = 0.0;
 	u[1] = (GLfloat) gr->border.left / gr->border.width;
@@ -1022,9 +743,9 @@ gl_renderer_repaint_output(struct weston_output *output,
 	int32_t width, height;
 	pixman_region32_t buffer_damage, total_damage;
 
-	width = output->current->width +
+	width = output->current_mode->width +
 		output->border.left + output->border.right;
-	height = output->current->height +
+	height = output->current_mode->height +
 		output->border.top + output->border.bottom;
 
 	glViewport(0, 0, width, height);
@@ -1260,6 +981,7 @@ gl_renderer_attach_shm(struct weston_surface *es, struct weston_buffer *buffer,
 		gs->target = GL_TEXTURE_2D;
 		gs->buffer_type = BUFFER_TYPE_SHM;
 		gs->needs_full_upload = 1;
+		gs->y_inverted = 1;
 
 		ensure_textures(gs, 1);
 		glBindTexture(GL_TEXTURE_2D, gs->textures[0]);
@@ -1284,6 +1006,8 @@ gl_renderer_attach_egl(struct weston_surface *es, struct weston_buffer *buffer,
 			 EGL_WIDTH, &buffer->width);
 	gr->query_buffer(gr->egl_display, buffer->legacy_buffer,
 			 EGL_HEIGHT, &buffer->height);
+	gr->query_buffer(gr->egl_display, buffer->legacy_buffer,
+			 EGL_WAYLAND_Y_INVERTED_WL, &buffer->y_inverted);
 
 	for (i = 0; i < gs->num_images; i++)
 		gr->destroy_image(gr->egl_display, gs->images[i]);
@@ -1340,6 +1064,7 @@ gl_renderer_attach_egl(struct weston_surface *es, struct weston_buffer *buffer,
 	gs->pitch = buffer->width;
 	gs->height = buffer->height;
 	gs->buffer_type = BUFFER_TYPE_EGL;
+	gs->y_inverted = buffer->y_inverted;
 }
 
 static void
@@ -1363,6 +1088,7 @@ gl_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 		glDeleteTextures(gs->num_textures, gs->textures);
 		gs->num_textures = 0;
 		gs->buffer_type = BUFFER_TYPE_NULL;
+		gs->y_inverted = 1;
 		return;
 	}
 
@@ -1377,6 +1103,7 @@ gl_renderer_attach(struct weston_surface *es, struct weston_buffer *buffer)
 		weston_log("unhandled buffer type!\n");
 		weston_buffer_reference(&gs->buffer_ref, NULL);
 		gs->buffer_type = BUFFER_TYPE_NULL;
+		gs->y_inverted = 1;
 	}
 }
 
@@ -1409,6 +1136,7 @@ gl_renderer_create_surface(struct weston_surface *surface)
 	 * by zero there.
 	 */
 	gs->pitch = 1;
+	gs->y_inverted = 1;
 
 	pixman_region32_init(&gs->texture_damage);
 	surface->renderer_state = gs;
@@ -1859,7 +1587,7 @@ egl_choose_config(struct gl_renderer *gr, const EGLint *attribs,
 					&id))
 				continue;
 
-			if (id != *visual_id)
+			if (id != 0 && id != *visual_id)
 				continue;
 		}
 

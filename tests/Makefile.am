@@ -1,11 +1,14 @@
 TESTS = $(shared_tests) $(module_tests) $(weston_tests)
 
 shared_tests = \
-	config-parser.test
+	config-parser.test		\
+	vertex-clip.test
 
 module_tests =				\
 	surface-test.la			\
 	surface-global-test.la
+
+weston_test = weston-test.la
 
 weston_tests =				\
 	keyboard.weston			\
@@ -29,18 +32,14 @@ clean-local:
 export abs_builddir
 
 noinst_LTLIBRARIES =			\
-	$(weston_test)
+	$(weston_test)			\
+	$(module_tests)
 
 noinst_PROGRAMS =			\
 	$(setbacklight)			\
-	matrix-test
-
-check_LTLIBRARIES =			\
-	$(module_tests)
-
-check_PROGRAMS =			\
 	$(shared_tests)			\
-	$(weston_tests)
+	$(weston_tests)			\
+	matrix-test
 
 AM_CFLAGS = $(GCC_CFLAGS)
 AM_CPPFLAGS =					\
@@ -49,20 +48,15 @@ AM_CPPFLAGS =					\
 	-I$(top_builddir)/src			\
 	-DUNIT_TEST				\
 	$(COMPOSITOR_CFLAGS)
-AM_LDFLAGS = -module -avoid-version -rpath $(libdir)
-
-config_parser_test_LDADD =	\
-	../shared/libshared.la	\
-	$(COMPOSITOR_LIBS)
-config_parser_test_SOURCES =	\
-	config-parser-test.c
 
 surface_global_test_la_SOURCES = surface-global-test.c
+surface_global_test_la_LDFLAGS = -module -avoid-version -rpath $(libdir)
 surface_test_la_SOURCES = surface-test.c
+surface_test_la_LDFLAGS = -module -avoid-version -rpath $(libdir)
 
-weston_test = weston-test.la
 weston_test_la_LIBADD = $(COMPOSITOR_LIBS)	\
 	../shared/libshared.la
+weston_test_la_LDFLAGS = -module -avoid-version -rpath $(libdir)
 weston_test_la_CFLAGS = $(GCC_CFLAGS) $(COMPOSITOR_CFLAGS)
 weston_test_la_SOURCES =		\
 	weston-test.c			\
@@ -72,17 +66,38 @@ weston_test_la_SOURCES =		\
 weston_test_runner_src =		\
 	weston-test-runner.c		\
 	weston-test-runner.h
+
+check_LTLIBRARIES = libshared-test.la
+
+libshared_test_la_SOURCES =	\
+	$(weston_test_runner_src)
+libshared_test_la_CFLAGS = $(GCC_CFLAGS) $(COMPOSITOR_CFLAGS)
+
+config_parser_test_LDADD =	\
+	../shared/libshared.la	\
+	libshared-test.la	\
+	$(COMPOSITOR_LIBS)
+config_parser_test_SOURCES =	\
+	config-parser-test.c
+vertex_clip_test_SOURCES =		\
+	vertex-clip-test.c		\
+	../src/vertex-clipping.c	\
+	../src/vertex-clipping.h
+vertex_clip_test_LDADD =	\
+	libshared-test.la	\
+	-lm -lrt
+
 weston_test_client_src =		\
 	weston-test-client-helper.c	\
 	weston-test-client-helper.h	\
 	wayland-test-protocol.c		\
 	wayland-test-client-protocol.h	\
 	subsurface-protocol.c		\
-	subsurface-client-protocol.h	\
-	$(weston_test_runner_src)
+	subsurface-client-protocol.h
 weston_test_client_libs =		\
 	$(SIMPLE_CLIENT_LIBS)		\
-	../shared/libshared.la
+	../shared/libshared.la		\
+	libshared-test.la
 
 keyboard_weston_SOURCES = keyboard-test.c $(weston_test_client_src)
 keyboard_weston_LDADD = $(weston_test_client_libs)

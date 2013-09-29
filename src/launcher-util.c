@@ -1,5 +1,6 @@
 /*
  * Copyright © 2012 Benjamin Franzke
+ * Copyright © 2013 Intel Corporation
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -27,11 +28,17 @@
 #include <string.h>
 
 #include <errno.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <sys/ioctl.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <linux/vt.h>
+#include <linux/kd.h>
+#include <linux/major.h>
 
 #include <xf86drm.h>
 
@@ -39,14 +46,28 @@
 #include "launcher-util.h"
 #include "weston-launch.h"
 
+#define DRM_MAJOR 226
+
+#ifndef KDSKBMUTE
+#define KDSKBMUTE	0x4B51
+#endif
+
 union cmsg_data { unsigned char b[4]; int fd; };
 
+struct weston_launcher {
+	struct weston_compositor *compositor;
+	int fd;
+	struct wl_event_source *source;
+
+	int kb_mode, tty, drm_fd;
+	struct wl_event_source *vt_source;
+};
+
 int
-weston_launcher_open(struct weston_compositor *compositor,
+weston_launcher_open(struct weston_launcher *launcher,
 		     const char *path, int flags)
 {
-	int sock = compositor->launcher_sock;
-	int n, ret = -1;
+	int n, fd, ret = -1;
 	struct msghdr msg;
 	struct cmsghdr *cmsg;
 	struct iovec iov;
@@ -54,9 +75,24 @@ weston_launcher_open(struct weston_compositor *compositor,
 	char control[CMSG_SPACE(sizeof data->fd)];
 	ssize_t len;
 	struct weston_launcher_open *message;
+	struct stat s;
 
-	if (sock == -1)
-		return open(path, flags | O_CLOEXEC);
+	if (launcher->fd == -1) {
+		fd = open(path, flags | O_CLOEXEC);
+
+		if (fd == -1)
+			return -1;
+
+		if (fstat(fd, &s) == -1) {
+			close(fd);
+			return -1;
+		}
+
+		if (major(s.st_rdev) == DRM_MAJOR)
+			launcher->drm_fd = fd;
+
+		return fd;
+	}
 
 	n = sizeof(*message) + strlen(path) + 1;
 	message = malloc(n);
@@ -68,7 +104,7 @@ weston_launcher_open(struct weston_compositor *compositor,
 	strcpy(message->path, path);
 
 	do {
-		len = send(sock, message, n, 0);
+		len = send(launcher->fd, message, n, 0);
 	} while (len < 0 && errno == EINTR);
 	free(message);
 
@@ -81,7 +117,7 @@ weston_launcher_open(struct weston_compositor *compositor,
 	msg.msg_controllen = sizeof control;
 	
 	do {
-		len = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+		len = recvmsg(launcher->fd, &msg, MSG_CMSG_CLOEXEC);
 	} while (len < 0 && errno == EINTR);
 
 	if (len != sizeof ret ||
@@ -105,58 +141,183 @@ weston_launcher_open(struct weston_compositor *compositor,
 	return data->fd;
 }
 
-int
-weston_launcher_drm_set_master(struct weston_compositor *compositor,
-			       int drm_fd, char master)
+void
+weston_launcher_restore(struct weston_launcher *launcher)
 {
-	struct msghdr msg;
-	struct cmsghdr *cmsg;
-	struct iovec iov;
-	char control[CMSG_SPACE(sizeof(drm_fd))];
-	int ret;
-	ssize_t len;
-	struct weston_launcher_set_master message;
-	union cmsg_data *data;
+	struct vt_mode mode = { 0 };
 
-	if (compositor->launcher_sock == -1) {
-		if (master)
-			return drmSetMaster(drm_fd);
-		else
-			return drmDropMaster(drm_fd);
-	}
+	if (ioctl(launcher->tty, KDSKBMUTE, 0) &&
+	    ioctl(launcher->tty, KDSKBMODE, launcher->kb_mode))
+		weston_log("failed to restore kb mode: %m\n");
 
-	memset(&msg, 0, sizeof msg);
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	msg.msg_control = control;
-	msg.msg_controllen = sizeof control;
-	cmsg = CMSG_FIRSTHDR(&msg);
-	cmsg->cmsg_level = SOL_SOCKET;
-	cmsg->cmsg_type = SCM_RIGHTS;
-	cmsg->cmsg_len = CMSG_LEN(sizeof(drm_fd));
+	if (ioctl(launcher->tty, KDSETMODE, KD_TEXT))
+		weston_log("failed to set KD_TEXT mode on tty: %m\n");
 
-	data = (union cmsg_data *) CMSG_DATA(cmsg);
-	data->fd = drm_fd;
-	msg.msg_controllen = cmsg->cmsg_len;
-
-	iov.iov_base = &message;
-	iov.iov_len = sizeof message;
-
-	message.header.opcode = WESTON_LAUNCHER_DRM_SET_MASTER;
-	message.set_master = master;
-
-	do {
-		len = sendmsg(compositor->launcher_sock, &msg, 0);
-	} while (len < 0 && errno == EINTR);
-	if (len < 0)
-		return -1;
-
-	do {
-		len = recv(compositor->launcher_sock, &ret, sizeof ret, 0);
-	} while (len < 0 && errno == EINTR);
-	if (len < 0)
-		return -1;
-
-	return ret;
+	mode.mode = VT_AUTO;
+	if (ioctl(launcher->tty, VT_SETMODE, &mode) < 0)
+		weston_log("could not reset vt handling\n");
 }
 
+static int
+weston_launcher_data(int fd, uint32_t mask, void *data)
+{
+	struct weston_launcher *launcher = data;
+	int len, ret;
+
+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR)) {
+		weston_log("launcher socket closed, exiting\n");
+		/* Normally the weston-launch will reset the tty, but
+		 * in this case it died or something, so do it here so
+		 * we don't end up with a stuck vt. */
+		weston_launcher_restore(launcher);
+		exit(-1);
+	}
+
+	do {
+		len = recv(launcher->fd, &ret, sizeof ret, 0);
+	} while (len < 0 && errno == EINTR);
+
+	switch (ret) {
+	case WESTON_LAUNCHER_ACTIVATE:
+		launcher->compositor->session_active = 1;
+		wl_signal_emit(&launcher->compositor->session_signal,
+			       launcher->compositor);
+		break;
+	case WESTON_LAUNCHER_DEACTIVATE:
+		launcher->compositor->session_active = 0;
+		wl_signal_emit(&launcher->compositor->session_signal,
+			       launcher->compositor);
+		break;
+	default:
+		weston_log("unexpected event from weston-launch\n");
+		break;
+	}
+
+	return 1;
+}
+
+static int
+vt_handler(int signal_number, void *data)
+{
+	struct weston_launcher *launcher = data;
+	struct weston_compositor *compositor = launcher->compositor;
+
+	if (compositor->session_active) {
+		compositor->session_active = 0;
+		wl_signal_emit(&compositor->session_signal, compositor);
+		if (launcher->drm_fd != -1)
+			drmDropMaster(launcher->drm_fd);
+		ioctl(launcher->tty, VT_RELDISP, 1);
+	} else {
+		ioctl(launcher->tty, VT_RELDISP, VT_ACKACQ);
+		if (launcher->drm_fd != -1)
+			drmSetMaster(launcher->drm_fd);
+		compositor->session_active = 1;
+		wl_signal_emit(&compositor->session_signal, compositor);
+	}
+
+	return 1;
+}
+
+static int
+setup_tty(struct weston_launcher *launcher)
+{
+	struct wl_event_loop *loop;
+	struct vt_mode mode = { 0 };
+	struct stat buf;
+	int ret;
+
+	if (fstat(STDIN_FILENO, &buf) == -1 ||
+	    major(buf.st_rdev) != TTY_MAJOR || minor(buf.st_rdev) == 0) {
+		weston_log("stdin not a vt\n");
+		return -1;
+	}
+
+	launcher->tty = STDIN_FILENO;
+	if (ioctl(launcher->tty, KDGKBMODE, &launcher->kb_mode)) {
+		weston_log("failed to read keyboard mode: %m\n");
+		return -1;
+	}
+
+	if (ioctl(launcher->tty, KDSKBMUTE, 1) &&
+	    ioctl(launcher->tty, KDSKBMODE, K_OFF)) {
+		weston_log("failed to set K_OFF keyboard mode: %m\n");
+		return -1;
+	}
+
+	ret = ioctl(launcher->tty, KDSETMODE, KD_GRAPHICS);
+	if (ret) {
+		weston_log("failed to set KD_GRAPHICS mode on tty: %m\n");
+		return -1;
+	}
+
+	mode.mode = VT_PROCESS;
+	mode.relsig = SIGUSR1;
+	mode.acqsig = SIGUSR1;
+	if (ioctl(launcher->tty, VT_SETMODE, &mode) < 0) {
+		weston_log("failed to take control of vt handling\n");
+		return -1;
+	}
+
+	loop = wl_display_get_event_loop(launcher->compositor->wl_display);
+	launcher->vt_source =
+		wl_event_loop_add_signal(loop, SIGUSR1, vt_handler, launcher);
+	if (!launcher->vt_source)
+		return -1;
+
+	return 0;
+}
+
+int
+weston_launcher_activate_vt(struct weston_launcher *launcher, int vt)
+{
+	return ioctl(launcher->tty, VT_ACTIVATE, vt);
+}
+
+struct weston_launcher *
+weston_launcher_connect(struct weston_compositor *compositor)
+{
+	struct weston_launcher *launcher;
+	struct wl_event_loop *loop;
+
+	launcher = malloc(sizeof *launcher);
+	if (launcher == NULL)
+		return NULL;
+
+	launcher->compositor = compositor;
+	launcher->drm_fd = -1;
+	launcher->fd = weston_environment_get_fd("WESTON_LAUNCHER_SOCK");
+	if (launcher->fd != -1) {
+		launcher->tty = weston_environment_get_fd("WESTON_TTY_FD");
+		loop = wl_display_get_event_loop(compositor->wl_display);
+		launcher->source = wl_event_loop_add_fd(loop, launcher->fd,
+							WL_EVENT_READABLE,
+							weston_launcher_data,
+							launcher);
+		if (launcher->source == NULL) {
+			free(launcher);
+			return NULL;
+		}
+	} else if (geteuid() == 0) {
+		setup_tty(launcher);
+	} else {
+		free(launcher);
+		return NULL;
+	}
+
+	return launcher;
+}
+
+void
+weston_launcher_destroy(struct weston_launcher *launcher)
+{
+	if (launcher->fd != -1) {
+		close(launcher->fd);
+		wl_event_source_remove(launcher->source);
+	} else {
+		weston_launcher_restore(launcher);
+		wl_event_source_remove(launcher->vt_source);
+	}
+
+	free(launcher);
+}

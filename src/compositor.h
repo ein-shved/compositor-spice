@@ -107,6 +107,8 @@ struct weston_shell_interface {
 	int (*move)(struct shell_surface *shsurf, struct weston_seat *ws);
 	int (*resize)(struct shell_surface *shsurf,
 		      struct weston_seat *ws, uint32_t edges);
+	void (*set_title)(struct shell_surface *shsurf,
+	                  const char *title);
 
 };
 
@@ -172,6 +174,12 @@ enum dpms_enum {
 	WESTON_DPMS_OFF
 };
 
+enum weston_mode_switch_op {
+	WESTON_MODE_SWITCH_SET_NATIVE,
+	WESTON_MODE_SWITCH_SET_TEMPORARY,
+	WESTON_MODE_SWITCH_RESTORE_NATIVE
+};
+
 struct weston_output {
 	uint32_t id;
 	char *name;
@@ -201,11 +209,13 @@ struct weston_output {
 	char *make, *model, *serial_number;
 	uint32_t subpixel;
 	uint32_t transform;
-	int32_t scale;
+	int32_t native_scale;
+	int32_t current_scale;
+	int32_t original_scale;
 
-	struct weston_mode *current;
-	struct weston_mode *origin;
-	int32_t origin_scale;
+	struct weston_mode *native_mode;
+	struct weston_mode *current_mode;
+	struct weston_mode *original_mode;
 	struct wl_list mode_list;
 
 	void (*start_repaint_loop)(struct weston_output *output);
@@ -300,9 +310,8 @@ struct weston_pointer {
 	struct weston_seat *seat;
 
 	struct wl_list resource_list;
+	struct wl_list focus_resource_list;
 	struct weston_surface *focus;
-	struct wl_resource *focus_resource;
-	struct wl_listener focus_listener;
 	uint32_t focus_serial;
 	struct wl_signal focus_signal;
 
@@ -326,9 +335,8 @@ struct weston_touch {
 	struct weston_seat *seat;
 
 	struct wl_list resource_list;
+	struct wl_list focus_resource_list;
 	struct weston_surface *focus;
-	struct wl_resource *focus_resource;
-	struct wl_listener focus_listener;
 	uint32_t focus_serial;
 	struct wl_signal focus_signal;
 
@@ -392,12 +400,18 @@ wl_data_device_manager_init(struct wl_display *display);
 void
 weston_seat_set_selection(struct weston_seat *seat,
 			  struct weston_data_source *source, uint32_t serial);
+int
+weston_seat_start_drag(struct weston_seat *seat,
+		       struct weston_data_source *source,
+		       struct weston_surface *icon,
+		       struct wl_client *client);
 
 struct weston_xkb_info {
 	struct xkb_keymap *keymap;
 	int keymap_fd;
 	size_t keymap_size;
 	char *keymap_area;
+	int32_t ref_count;
 	xkb_mod_index_t shift_mod;
 	xkb_mod_index_t caps_mod;
 	xkb_mod_index_t ctrl_mod;
@@ -415,9 +429,8 @@ struct weston_keyboard {
 	struct weston_seat *seat;
 
 	struct wl_list resource_list;
+	struct wl_list focus_resource_list;
 	struct weston_surface *focus;
-	struct wl_resource *focus_resource;
-	struct wl_listener focus_listener;
 	uint32_t focus_serial;
 	struct wl_signal focus_signal;
 
@@ -468,7 +481,7 @@ struct weston_seat {
 
 	void (*led_update)(struct weston_seat *ws, enum weston_led leds);
 
-	struct weston_xkb_info xkb_info;
+	struct weston_xkb_info *xkb_info;
 	struct {
 		struct xkb_state *state;
 		enum weston_led leds;
@@ -548,6 +561,9 @@ struct weston_compositor {
 	struct wl_event_loop *input_loop;
 	struct wl_event_source *input_loop_source;
 
+	struct wl_signal session_signal;
+	int session_active;
+
 	struct weston_layer fade_layer;
 	struct weston_layer cursor_layer;
 
@@ -582,13 +598,13 @@ struct weston_compositor {
 
 	void (*ping_handler)(struct weston_surface *surface, uint32_t serial);
 
-	int launcher_sock;
+	struct weston_launcher *launcher;
 
 	uint32_t output_id_pool;
 
 	struct xkb_rule_names xkb_names;
 	struct xkb_context *xkb_context;
-	struct weston_xkb_info xkb_info;
+	struct weston_xkb_info *xkb_info;
 
 	/* Raw keyboard processing (no libxkbcommon initialization or handling) */
 	int use_xkbcommon;
@@ -605,6 +621,7 @@ struct weston_buffer {
 	};
 	int32_t width, height;
 	uint32_t busy_count;
+	int y_inverted;
 };
 
 struct weston_buffer_reference {
@@ -1130,11 +1147,8 @@ enum {
 	TTY_LEAVE_VT
 };
 
-typedef void (*tty_vt_func_t)(struct weston_compositor *compositor, int event);
-
 struct tty *
-tty_create(struct weston_compositor *compositor,
-	   tty_vt_func_t vt_func, int tty_nr);
+tty_create(struct weston_compositor *compositor, int tty_nr);
 
 void
 tty_destroy(struct tty *tty);
@@ -1202,7 +1216,8 @@ void
 weston_surface_destroy(struct weston_surface *surface);
 
 int
-weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode, int32_t scale);
+weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode,
+			int32_t scale, enum weston_mode_switch_op op);
 
 int
 noop_renderer_init(struct weston_compositor *ec);

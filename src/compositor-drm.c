@@ -30,6 +30,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <linux/input.h>
+#include <linux/vt.h>
 #include <assert.h>
 #include <sys/mman.h>
 #include <time.h>
@@ -83,7 +84,8 @@ struct drm_compositor {
 	int num_crtcs;
 	uint32_t crtc_allocator;
 	uint32_t connector_allocator;
-	struct tty *tty;
+	struct wl_listener session_listener;
+	uint32_t format;
 
 	/* we need these parameters in order to not fail drmModeAddFB2()
 	 * due to out of bounds dimensions, and then mistakenly set
@@ -449,8 +451,8 @@ drm_output_prepare_scanout_surface(struct weston_output *_output,
 	if (es->geometry.x != output->base.x ||
 	    es->geometry.y != output->base.y ||
 	    buffer == NULL || c->gbm == NULL ||
-	    buffer->width != output->base.current->width ||
-	    buffer->height != output->base.current->height ||
+	    buffer->width != output->base.current_mode->width ||
+	    buffer->height != output->base.current_mode->height ||
 	    output->base.transform != es->buffer_transform ||
 	    es->transform.enabled)
 		return NULL;
@@ -494,7 +496,7 @@ drm_output_render_gl(struct drm_output *output, pixman_region32_t *damage)
 		return;
 	}
 
-	output->next = drm_fb_get_from_bo(bo, c, GBM_FORMAT_XRGB8888);
+	output->next = drm_fb_get_from_bo(bo, c, c->format);
 	if (!output->next) {
 		weston_log("failed to get drm_fb for bo\n");
 		gbm_surface_release_buffer(output->surface, bo);
@@ -580,7 +582,7 @@ drm_output_repaint(struct weston_output *output_base,
 	if (!output->next)
 		return;
 
-	mode = container_of(output->base.current, struct drm_mode, base);
+	mode = container_of(output->base.current_mode, struct drm_mode, base);
 	if (!output->current) {
 		ret = drmModeSetCrtc(compositor->drm.fd, output->crtc_id,
 				     output->next->fb_id, 0, 0,
@@ -786,7 +788,7 @@ drm_output_prepare_overlay_surface(struct weston_output *output_base,
 	if (es->buffer_transform != output_base->transform)
 		return NULL;
 
-	if (es->buffer_scale != output_base->scale)
+	if (es->buffer_scale != output_base->current_scale)
 		return NULL;
 
 	if (c->sprites_are_broken)
@@ -858,7 +860,7 @@ drm_output_prepare_overlay_surface(struct weston_output *output_base,
 	tbox = weston_transformed_rect(output_base->width,
 				       output_base->height,
 				       output_base->transform,
-				       output_base->scale,
+				       output_base->current_scale,
 				       *box);
 	s->dest_x = tbox.x1;
 	s->dest_y = tbox.y1;
@@ -977,8 +979,8 @@ drm_output_set_cursor(struct drm_output *output)
 		}
 	}
 
-	x = (es->geometry.x - output->base.x) * output->base.scale;
-	y = (es->geometry.y - output->base.y) * output->base.scale;
+	x = (es->geometry.x - output->base.x) * output->base.current_scale;
+	y = (es->geometry.y - output->base.y) * output->base.current_scale;
 	if (output->cursor_plane.x != x || output->cursor_plane.y != y) {
 		if (drmModeMoveCursor(c->drm.fd, output->crtc_id, x, y)) {
 			weston_log("failed to move cursor: %m\n");
@@ -1099,11 +1101,11 @@ choose_mode (struct drm_output *output, struct weston_mode *target_mode)
 {
 	struct drm_mode *tmp_mode = NULL, *mode;
 
-	if (output->base.current->width == target_mode->width && 
-	    output->base.current->height == target_mode->height &&
-	    (output->base.current->refresh == target_mode->refresh ||
+	if (output->base.current_mode->width == target_mode->width &&
+	    output->base.current_mode->height == target_mode->height &&
+	    (output->base.current_mode->refresh == target_mode->refresh ||
 	     target_mode->refresh == 0))
-		return (struct drm_mode *)output->base.current;
+		return (struct drm_mode *)output->base.current_mode;
 
 	wl_list_for_each(mode, &output->base.mode_list, base.link) {
 		if (mode->mode_info.hdisplay == target_mode->width &&
@@ -1150,13 +1152,13 @@ drm_output_switch_mode(struct weston_output *output_base, struct weston_mode *mo
 		return -1;
 	}
 
-	if (&drm_mode->base == output->base.current)
+	if (&drm_mode->base == output->base.current_mode)
 		return 0;
 
-	output->base.current->flags = 0;
+	output->base.current_mode->flags = 0;
 
-	output->base.current = &drm_mode->base;
-	output->base.current->flags =
+	output->base.current_mode = &drm_mode->base;
+	output->base.current_mode->flags =
 		WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED;
 
 	/* reset rendering stuff. */
@@ -1215,7 +1217,7 @@ init_drm(struct drm_compositor *ec, struct udev_device *device)
 	}
 
 	filename = udev_device_get_devnode(device);
-	fd = open(filename, O_RDWR | O_CLOEXEC);
+	fd = weston_launcher_open(ec->base.launcher, filename, O_RDWR);
 	if (fd < 0) {
 		/* Probably permissions error */
 		weston_log("couldn't open %s, skipping\n",
@@ -1245,8 +1247,9 @@ init_egl(struct drm_compositor *ec)
 	if (!ec->gbm)
 		return -1;
 
-	if (gl_renderer_create(&ec->base, ec->gbm, gl_renderer_opaque_attribs,
-			NULL) < 0) {
+	if (gl_renderer_create(&ec->base, ec->gbm,
+			       gl_renderer_opaque_attribs,
+			       &ec->format) < 0) {
 		gbm_device_destroy(ec->gbm);
 		return -1;
 	}
@@ -1438,9 +1441,9 @@ drm_output_init_egl(struct drm_output *output, struct drm_compositor *ec)
 	int i, flags;
 
 	output->surface = gbm_surface_create(ec->gbm,
-					     output->base.current->width,
-					     output->base.current->height,
-					     GBM_FORMAT_XRGB8888,
+					     output->base.current_mode->width,
+					     output->base.current_mode->height,
+					     ec->format,
 					     GBM_BO_USE_SCANOUT |
 					     GBM_BO_USE_RENDERING);
 	if (!output->surface) {
@@ -1476,8 +1479,8 @@ drm_output_init_egl(struct drm_output *output, struct drm_compositor *ec)
 static int
 drm_output_init_pixman(struct drm_output *output, struct drm_compositor *c)
 {
-	int w = output->base.current->width;
-	int h = output->base.current->height;
+	int w = output->base.current_mode->width;
+	int h = output->base.current_mode->height;
 	unsigned int i;
 
 	/* FIXME error checking */
@@ -1897,20 +1900,20 @@ create_output_for_connector(struct drm_compositor *ec,
 		configured = current;
 
 	if (option_current_mode && current)
-		output->base.current = &current->base;
+		output->base.current_mode = &current->base;
 	else if (configured)
-		output->base.current = &configured->base;
+		output->base.current_mode = &configured->base;
 	else if (preferred)
-		output->base.current = &preferred->base;
+		output->base.current_mode = &preferred->base;
 	else if (current)
-		output->base.current = &current->base;
+		output->base.current_mode = &current->base;
 
-	if (output->base.current == NULL) {
+	if (output->base.current_mode == NULL) {
 		weston_log("no available modes for %s\n", output->base.name);
 		goto err_free;
 	}
 
-	output->base.current->flags |= WL_OUTPUT_MODE_CURRENT;
+	output->base.current_mode->flags |= WL_OUTPUT_MODE_CURRENT;
 
 	weston_output_init(&output->base, &ec->base, x, y,
 			   connector->mmWidth, connector->mmHeight,
@@ -1943,7 +1946,6 @@ create_output_for_connector(struct drm_compositor *ec,
 	if (connector->connector_type == DRM_MODE_CONNECTOR_LVDS)
 		output->base.connection_internal = 1;
 
-	output->base.origin = output->base.current;
 	output->base.start_repaint_loop = drm_output_start_repaint_loop;
 	output->base.repaint = drm_output_repaint;
 	output->base.destroy = drm_output_destroy;
@@ -2239,11 +2241,7 @@ udev_drm_event(int fd, uint32_t mask, void *data)
 static void
 drm_restore(struct weston_compositor *ec)
 {
-	struct drm_compositor *d = (struct drm_compositor *) ec;
-
-	if (weston_launcher_drm_set_master(&d->base, d->drm.fd, 0) < 0)
-		weston_log("failed to drop master: %m\n");
-	tty_reset(d->tty);
+	weston_launcher_restore(ec->launcher);
 }
 
 static void
@@ -2265,9 +2263,7 @@ drm_destroy(struct weston_compositor *ec)
 	if (d->gbm)
 		gbm_device_destroy(d->gbm);
 
-	if (weston_launcher_drm_set_master(&d->base, d->drm.fd, 0) < 0)
-		weston_log("failed to drop master: %m\n");
-	tty_destroy(d->tty);
+	weston_launcher_destroy(d->base.launcher);
 
 	close(d->drm.fd);
 
@@ -2292,7 +2288,7 @@ drm_compositor_set_modes(struct drm_compositor *compositor)
 			continue;
 		}
 
-		drm_mode = (struct drm_mode *) output->base.current;
+		drm_mode = (struct drm_mode *) output->base.current_mode;
 		ret = drmModeSetCrtc(compositor->drm.fd, output->crtc_id,
 				     output->current->fb_id, 0, 0,
 				     &output->connector_id, 1,
@@ -2307,17 +2303,17 @@ drm_compositor_set_modes(struct drm_compositor *compositor)
 }
 
 static void
-vt_func(struct weston_compositor *compositor, int event)
+session_notify(struct wl_listener *listener, void *data)
 {
-	struct drm_compositor *ec = (struct drm_compositor *) compositor;
+	struct weston_compositor *compositor = data;
+	struct drm_compositor *ec = data;
 	struct drm_sprite *sprite;
 	struct drm_output *output;
 
-	switch (event) {
-	case TTY_ENTER_VT:
-		weston_log("entering VT\n");
+	if (ec->base.session_active) {
+		weston_log("activating session\n");
 		compositor->focus = 1;
-		if (weston_launcher_drm_set_master(&ec->base, ec->drm.fd, 1)) {
+		if (ec->base.launcher == NULL && drmSetMaster(ec->drm.fd)) {
 			weston_log("failed to set master: %m\n");
 			wl_display_terminate(compositor->wl_display);
 		}
@@ -2325,9 +2321,8 @@ vt_func(struct weston_compositor *compositor, int event)
 		drm_compositor_set_modes(ec);
 		weston_compositor_damage_all(compositor);
 		udev_input_enable(&ec->input, ec->udev);
-		break;
-	case TTY_LEAVE_VT:
-		weston_log("leaving VT\n");
+	} else {
+		weston_log("deactivating session\n");
 		udev_input_disable(&ec->input);
 
 		compositor->focus = 0;
@@ -2356,19 +2351,17 @@ vt_func(struct weston_compositor *compositor, int event)
 					output->crtc_id, 0, 0,
 					0, 0, 0, 0, 0, 0, 0, 0);
 
-		if (weston_launcher_drm_set_master(&ec->base, ec->drm.fd, 0) < 0)
+		if (ec->base.launcher == NULL && drmDropMaster(ec->drm.fd) < 0)
 			weston_log("failed to drop master: %m\n");
-
-		break;
 	};
 }
 
 static void
 switch_vt_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
 {
-	struct drm_compositor *ec = data;
+	struct weston_compositor *compositor = data;
 
-	tty_activate_vt(ec->tty, key - KEY_F1 + 1);
+	weston_launcher_activate_vt(compositor->launcher, key - KEY_F1 + 1);
 }
 
 /*
@@ -2471,8 +2464,6 @@ recorder_frame_notify(struct wl_listener *listener, void *data)
 	}
 
 	vaapi_recorder_frame(output->recorder, fd, output->current->stride / 4);
-
-	close(fd);
 }
 
 static void *
@@ -2504,8 +2495,8 @@ recorder_binding(struct weston_seat *seat, uint32_t time, uint32_t key,
 			      struct drm_output, base.link);
 
 	if (!output->recorder) {
-		width = output->base.current->width;
-		height = output->base.current->height;
+		width = output->base.current_mode->width;
+		height = output->base.current_mode->height;
 
 		output->recorder =
 			create_recorder(c, width, height, "capture.h264");
@@ -2525,7 +2516,6 @@ recorder_binding(struct weston_seat *seat, uint32_t time, uint32_t key,
 		weston_log("[libva recorder] initialized\n");
 	} else {
 		vaapi_recorder_destroy(output->recorder);
-		/* FIXME: close drm fd passed to recorder */
 		output->recorder = NULL;
 
 		output->base.disable_planes--;
@@ -2564,7 +2554,7 @@ drm_compositor_create(struct wl_display *display,
 	/* KMS support for sprites is not complete yet, so disable the
 	 * functionality for now. */
 	ec->sprites_are_broken = 1;
-
+	ec->format = GBM_FORMAT_XRGB8888;
 	ec->use_pixman = pixman;
 
 	if (weston_compositor_init(&ec->base, display, argc, argv,
@@ -2574,9 +2564,8 @@ drm_compositor_create(struct wl_display *display,
 	}
 
 	/* Check if we run drm-backend using weston-launch */
-	ec->base.launcher_sock =
-		weston_environment_get_fd("WESTON_LAUNCHER_SOCK");
-	if (ec->base.launcher_sock == -1 && geteuid() != 0) {
+	ec->base.launcher = weston_launcher_connect(&ec->base);
+	if (ec->base.launcher == NULL) {
 		weston_log("fatal: drm backend should be run "
 			   "using weston-launch binary or as root\n");
 		goto err_compositor;
@@ -2585,20 +2574,17 @@ drm_compositor_create(struct wl_display *display,
 	ec->udev = udev_new();
 	if (ec->udev == NULL) {
 		weston_log("failed to initialize udev context\n");
-		goto err_compositor;
+		goto err_launcher;
 	}
 
 	ec->base.wl_display = display;
-	ec->tty = tty_create(&ec->base, vt_func, tty);
-	if (!ec->tty) {
-		weston_log("failed to initialize tty\n");
-		goto err_udev;
-	}
+	ec->session_listener.notify = session_notify;
+	wl_signal_add(&ec->base.session_signal, &ec->session_listener);
 
 	drm_device = find_primary_gpu(ec, seat_id);
 	if (drm_device == NULL) {
 		weston_log("no drm device found\n");
-		goto err_tty;
+		goto err_udev;
 	}
 	path = udev_device_get_syspath(drm_device);
 
@@ -2693,10 +2679,8 @@ err_sprite:
 	destroy_sprites(ec);
 err_udev_dev:
 	udev_device_unref(drm_device);
-err_tty:
-	if (weston_launcher_drm_set_master(&ec->base, ec->drm.fd, 0) < 0)
-		weston_log("failed to drop master: %m\n");
-	tty_destroy(ec->tty);
+err_launcher:
+	weston_launcher_destroy(ec->base.launcher);
 err_udev:
 	udev_unref(ec->udev);
 err_compositor:

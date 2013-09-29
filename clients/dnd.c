@@ -81,6 +81,9 @@ static const int item_width = 64;
 static const int item_height = 64;
 static const int item_padding = 16;
 
+static const char flower_mime_type[] = "application/x-wayland-dnd-flower";
+static const char text_mime_type[] = "text/plain;charset=utf-8";
+
 static struct item *
 item_create(struct display *display, int x, int y, int seed)
 {
@@ -278,13 +281,26 @@ data_source_send(void *data, struct wl_data_source *source,
 {
 	struct dnd_flower_message dnd_flower_message;	
 	struct dnd_drag *dnd_drag = data;
-	
-	dnd_flower_message.seed = dnd_drag->item->seed;
-	dnd_flower_message.x_offset = dnd_drag->x_offset;
-	dnd_flower_message.y_offset = dnd_drag->y_offset;
+	char buffer[128];
+	int n;
 
-	if (write(fd, &dnd_flower_message, sizeof dnd_flower_message) < 0)
-		abort();
+	if (strcmp(mime_type, flower_mime_type) == 0) {
+		dnd_flower_message.seed = dnd_drag->item->seed;
+		dnd_flower_message.x_offset = dnd_drag->x_offset;
+		dnd_flower_message.y_offset = dnd_drag->y_offset;
+
+		if (write(fd, &dnd_flower_message,
+			  sizeof dnd_flower_message) < 0)
+			abort();
+	} else if (strcmp(mime_type, text_mime_type) == 0) {
+		n = snprintf(buffer, sizeof buffer, "seed=%d x=%d y=%d\n",
+			     dnd_drag->item->seed,
+			     dnd_drag->x_offset,
+			     dnd_drag->y_offset);
+
+		if (write(fd, buffer, n) < 0)
+			abort();
+	}
 
 	close(fd);
 }
@@ -423,9 +439,9 @@ dnd_button_handler(struct widget *widget,
 						    &data_source_listener,
 						    dnd_drag);
 			wl_data_source_offer(dnd_drag->data_source,
-					     "application/x-wayland-dnd-flower");
+					     flower_mime_type);
 			wl_data_source_offer(dnd_drag->data_source,
-					     "text/plain; charset=utf-8");
+					     text_mime_type);
 		}
 
 		wl_data_device_start_drag(input_get_data_device(input),
@@ -495,14 +511,18 @@ dnd_data_handler(struct window *window,
 		 float x, float y, const char **types, void *data)
 {
 	struct dnd *dnd = data;
+	int i, has_flower = 0;
 
 	if (!types)
 		return;
+	for (i = 0; types[i]; i++)
+		if (strcmp(types[i], flower_mime_type) == 0)
+			has_flower = 1;
 
-	if (dnd_get_item(dnd, x, y) || dnd->self_only) {
+	if (dnd_get_item(dnd, x, y) || dnd->self_only || !has_flower) {
 		input_accept(input, NULL);
 	} else {
-		input_accept(input, types[0]);
+		input_accept(input, flower_mime_type);
 	}
 }
 
@@ -546,7 +566,7 @@ dnd_drop_handler(struct window *window, struct input *input,
 
 	if (!dnd->self_only) {
 		input_receive_drag_data(input,
-					"application/x-wayland-dnd-flower",
+					flower_mime_type,
 					dnd_receive_func, dnd);
 	} else if (dnd->current_drag) {
 		message.seed = dnd->current_drag->item->seed;

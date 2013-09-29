@@ -2,20 +2,17 @@ bin_PROGRAMS =					\
 	weston-info				\
 	$(terminal)
 
+demo_clients = \
+	$(clients_programs)			\
+	$(pango_programs)			\
+	$(poppler_programs)			\
+	$(simple_clients_programs)		\
+	$(simple_egl_clients_programs)
+
 if ENABLE_DEMO_CLIENTS
-bin_PROGRAMS +=					\
-	$(clients_programs)			\
-	$(pango_programs)			\
-	$(poppler_programs)			\
-	$(simple_clients_programs)		\
-	$(simple_egl_clients_programs)
+bin_PROGRAMS += $(demo_clients)
 else
-noinst_PROGRAMS =				\
-	$(clients_programs)			\
-	$(pango_programs)			\
-	$(poppler_programs)			\
-	$(simple_clients_programs)		\
-	$(simple_egl_clients_programs)
+noinst_PROGRAMS = $(demo_clients)
 endif
 
 libexec_PROGRAMS =				\
@@ -35,7 +32,8 @@ AM_CPPFLAGS =					\
 if BUILD_SIMPLE_CLIENTS
 simple_clients_programs =			\
 	weston-simple-shm			\
-	weston-simple-touch
+	weston-simple-touch			\
+	weston-multi-resource
 
 weston_simple_shm_SOURCES = simple-shm.c 	\
 	../shared/os-compatibility.c		\
@@ -48,6 +46,12 @@ weston_simple_touch_SOURCES = simple-touch.c	\
 	../shared/os-compatibility.h
 weston_simple_touch_CPPFLAGS = $(SIMPLE_CLIENT_CFLAGS)
 weston_simple_touch_LDADD = $(SIMPLE_CLIENT_LIBS)
+
+weston_multi_resource_SOURCES = multi-resource.c	\
+	../shared/os-compatibility.c			\
+	../shared/os-compatibility.h
+weston_multi_resource_CPPFLAGS = $(SIMPLE_CLIENT_CFLAGS)
+weston_multi_resource_LDADD = $(SIMPLE_CLIENT_LIBS) -lm
 endif
 
 if BUILD_SIMPLE_EGL_CLIENTS

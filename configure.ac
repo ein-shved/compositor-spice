@@ -1,6 +1,6 @@
 m4_define([weston_major_version], [1])
 m4_define([weston_minor_version], [2])
-m4_define([weston_micro_version], [90])
+m4_define([weston_micro_version], [91])
 m4_define([weston_version],
           [weston_major_version.weston_minor_version.weston_micro_version])
 
@@ -55,7 +55,7 @@ AC_CHECK_HEADERS([execinfo.h])
 
 AC_CHECK_FUNCS([mkostemp strchrnul initgroups])
 
-COMPOSITOR_MODULES="wayland-server >= 1.2.90 pixman-1"
+COMPOSITOR_MODULES="wayland-server >= 1.2.91 pixman-1"
 
 AC_ARG_ENABLE(egl, [  --disable-egl],,
               enable_egl=yes)
@@ -190,7 +190,7 @@ AM_CONDITIONAL([ENABLE_FBDEV_COMPOSITOR],
                [test x$enable_fbdev_compositor = xyes])
 AS_IF([test x$enable_fbdev_compositor = xyes], [
   AC_DEFINE([BUILD_FBDEV_COMPOSITOR], [1], [Build the fbdev compositor])
-  PKG_CHECK_MODULES([FBDEV_COMPOSITOR], [libudev >= 136 mtdev >= 1.1.0 libdrm >= 2.4.30])
+  PKG_CHECK_MODULES([FBDEV_COMPOSITOR], [libudev >= 136 mtdev >= 1.1.0])
 ])
 
 AC_ARG_ENABLE([rdp-compositor], [  --enable-rdp-compositor],,

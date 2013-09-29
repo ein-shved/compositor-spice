@@ -96,26 +96,82 @@ static void
 weston_compositor_build_surface_list(struct weston_compositor *compositor);
 
 WL_EXPORT int
-weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode, int32_t scale)
+weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode,
+		int32_t scale, enum weston_mode_switch_op op)
 {
 	struct weston_seat *seat;
+	struct wl_resource *resource;
 	pixman_region32_t old_output_region;
-	int ret;
+	int ret, notify_mode_changed, notify_scale_changed;
+	int temporary_mode, temporary_scale;
 
 	if (!output->switch_mode)
 		return -1;
 
-	ret = output->switch_mode(output, mode);
-	if (ret < 0)
-		return ret;
+	temporary_mode = (output->original_mode != 0);
+	temporary_scale = (output->current_scale != output->original_scale);
+	ret = 0;
 
-        output->scale = scale;
+	notify_mode_changed = 0;
+	notify_scale_changed = 0;
+	switch(op) {
+	case WESTON_MODE_SWITCH_SET_NATIVE:
+		output->native_mode = mode;
+		if (!temporary_mode) {
+			notify_mode_changed = 1;
+			ret = output->switch_mode(output, mode);
+			if (ret < 0)
+				return ret;
+		}
+
+		output->native_scale = scale;
+		if(!temporary_scale)
+			notify_scale_changed = 1;
+		break;
+	case WESTON_MODE_SWITCH_SET_TEMPORARY:
+		if (!temporary_mode)
+			output->original_mode = output->native_mode;
+		if (!temporary_scale)
+			output->original_scale = output->native_scale;
+
+		ret = output->switch_mode(output, mode);
+		if (ret < 0)
+			return ret;
+
+		output->current_mode = mode;
+		output->current_scale = scale;
+		break;
+	case WESTON_MODE_SWITCH_RESTORE_NATIVE:
+		if (!temporary_mode) {
+			weston_log("already in the native mode\n");
+			return -1;
+		}
+
+		notify_mode_changed = (output->original_mode != output->native_mode);
+
+		ret = output->switch_mode(output, mode);
+		if (ret < 0)
+			return ret;
+
+		if (output->original_scale != output->native_scale) {
+			notify_scale_changed = 1;
+			scale = output->native_scale;
+			output->original_scale = scale;
+		}
+		output->original_mode = 0;
+
+		output->current_scale = output->native_scale;
+		break;
+	default:
+		weston_log("unknown weston_switch_mode_op %d\n", op);
+		break;
+	}
 
 	pixman_region32_init(&old_output_region);
 	pixman_region32_copy(&old_output_region, &output->region);
 
 	/* Update output region and transformation matrix */
-	weston_output_transform_scale_init(output, output->transform, output->scale);
+	weston_output_transform_scale_init(output, output->transform, output->current_scale);
 
 	pixman_region32_init(&output->previous_damage);
 	pixman_region32_init_rect(&output->region, output->x, output->y,
@@ -152,6 +208,25 @@ weston_output_switch_mode(struct weston_output *output, struct weston_mode *mode
 
 	pixman_region32_fini(&old_output_region);
 
+	/* notify clients of the changes */
+	if (notify_mode_changed || notify_scale_changed) {
+		wl_resource_for_each(resource, &output->resource_list) {
+			if(notify_mode_changed) {
+				wl_output_send_mode(resource,
+						mode->flags | WL_OUTPUT_MODE_CURRENT,
+						mode->width,
+						mode->height,
+						mode->refresh);
+			}
+
+			if (notify_scale_changed)
+				wl_output_send_scale(resource, scale);
+
+			if (wl_resource_get_version(resource) >= 2)
+				   wl_output_send_done(resource);
+		}
+	}
+
 	return ret;
 }
 
@@ -172,8 +247,11 @@ child_client_exec(int sockfd, const char *path)
 	sigfillset(&allsigs);
 	sigprocmask(SIG_UNBLOCK, &allsigs, NULL);
 
-	/* Launch clients as the user. */
-	seteuid(getuid());
+	/* Launch clients as the user. Do not lauch clients with wrong euid.*/
+	if (seteuid(getuid()) == -1) {
+		weston_log("compositor: failed seteuid\n");
+		return;
+	}
 
 	/* SOCK_CLOEXEC closes both ends, so we dup the fd to get a
 	 * non-CLOEXEC fd to pass through exec. */
@@ -979,6 +1057,8 @@ weston_surface_unmap(struct weston_surface *surface)
 	weston_surface_damage_below(surface);
 	surface->output = NULL;
 	wl_list_remove(&surface->layer_link);
+	wl_list_remove(&surface->link);
+	wl_list_init(&surface->link);
 
 	wl_list_for_each(seat, &surface->compositor->seat_list, link) {
 		if (seat->keyboard && seat->keyboard->focus == surface)
@@ -1016,10 +1096,8 @@ weston_surface_destroy(struct weston_surface *surface)
 	assert(wl_list_empty(&surface->subsurface_list_pending));
 	assert(wl_list_empty(&surface->subsurface_list));
 
-	if (weston_surface_is_mapped(surface)) {
+	if (weston_surface_is_mapped(surface))
 		weston_surface_unmap(surface);
-		weston_compositor_build_surface_list(compositor);
-	}
 
 	wl_list_for_each_safe(cb, next,
 			      &surface->pending.frame_callback_list, link)
@@ -1088,6 +1166,7 @@ weston_buffer_from_resource(struct wl_resource *resource)
 	buffer->resource = resource;
 	wl_signal_init(&buffer->destroy_signal);
 	buffer->destroy_listener.notify = weston_buffer_destroy_handler;
+	buffer->y_inverted = 1;
 	wl_resource_add_destroy_listener(resource, &buffer->destroy_listener);
 	
 	return buffer;
@@ -1873,7 +1952,7 @@ weston_subsurface_commit_to_cache(struct weston_subsurface *sub)
 	 * If this commit would cause the surface to move by the
 	 * attach(dx, dy) parameters, the old damage region must be
 	 * translated to correspond to the new surface coordinate system
-	 * origin.
+	 * original_mode.
 	 */
 	pixman_region32_translate(&sub->cached.damage,
 				  -surface->pending.sx, -surface->pending.sy);
@@ -2584,7 +2663,7 @@ bind_output(struct wl_client *client,
 				output->transform);
 	if (version >= 2)
 		wl_output_send_scale(resource,
-				     output->scale);
+				     output->current_scale);
 
 	wl_list_for_each (mode, &output->mode_list, link) {
 		wl_output_send_mode(resource,
@@ -2713,21 +2792,21 @@ weston_output_transform_scale_init(struct weston_output *output, uint32_t transf
 	case WL_OUTPUT_TRANSFORM_FLIPPED_90:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_270:
 		/* Swap width and height */
-		output->width = output->current->height;
-		output->height = output->current->width;
+		output->width = output->current_mode->height;
+		output->height = output->current_mode->width;
 		break;
 	case WL_OUTPUT_TRANSFORM_NORMAL:
 	case WL_OUTPUT_TRANSFORM_180:
 	case WL_OUTPUT_TRANSFORM_FLIPPED:
 	case WL_OUTPUT_TRANSFORM_FLIPPED_180:
-		output->width = output->current->width;
-		output->height = output->current->height;
+		output->width = output->current_mode->width;
+		output->height = output->current_mode->height;
 		break;
 	default:
 		break;
 	}
 
-        output->scale = scale;
+	output->native_scale = output->current_scale = scale;
 	output->width /= scale;
 	output->height /= scale;
 }
@@ -2759,7 +2838,7 @@ weston_output_init(struct weston_output *output, struct weston_compositor *c,
 	output->mm_width = mm_width;
 	output->mm_height = mm_height;
 	output->dirty = 1;
-	output->origin_scale = scale;
+	output->original_scale = scale;
 
 	weston_output_transform_scale_init(output, transform, scale);
 	weston_output_init_zoom(output);
@@ -2789,8 +2868,8 @@ weston_output_transform_coordinate(struct weston_output *output,
 	wl_fixed_t tx, ty;
 	wl_fixed_t width, height;
 
-	width = wl_fixed_from_int(output->width * output->scale - 1);
-	height = wl_fixed_from_int(output->height * output->scale - 1);
+	width = wl_fixed_from_int(output->width * output->current_scale - 1);
+	height = wl_fixed_from_int(output->height * output->current_scale - 1);
 
 	switch(output->transform) {
 	case WL_OUTPUT_TRANSFORM_NORMAL:
@@ -2828,8 +2907,8 @@ weston_output_transform_coordinate(struct weston_output *output,
 		break;
 	}
 
-	*x = tx / output->scale + wl_fixed_from_int(output->x);
-	*y = ty / output->scale + wl_fixed_from_int(output->y);
+	*x = tx / output->current_scale + wl_fixed_from_int(output->x);
+	*y = ty / output->current_scale + wl_fixed_from_int(output->y);
 }
 
 static void
@@ -2907,6 +2986,8 @@ weston_compositor_init(struct weston_compositor *ec,
 	wl_signal_init(&ec->update_input_panel_signal);
 	wl_signal_init(&ec->seat_created_signal);
 	wl_signal_init(&ec->output_created_signal);
+	wl_signal_init(&ec->session_signal);
+	ec->session_active = 1;
 
 	ec->output_id_pool = 0;
 
@@ -3342,7 +3423,7 @@ int main(int argc, char *argv[])
 		*(*backend_init)(struct wl_display *display,
 				 int *argc, char *argv[],
 				 struct weston_config *config);
-	int i, config_fd;
+	int i;
 	char *backend = NULL;
 	char *shell = NULL;
 	char *modules, *option_modules = NULL;
@@ -3410,10 +3491,13 @@ int main(int argc, char *argv[])
 			backend = WESTON_NATIVE_BACKEND;
 	}
 
-	config_fd = open_config_file("weston.ini");
-	config = weston_config_parse(config_fd);
-	close(config_fd);
-
+	config = weston_config_parse("weston.ini");
+	if (config != NULL) {
+		weston_log("Using config file '%s'\n",
+			   weston_config_get_full_path(config));
+	} else {
+		weston_log("Starting with no config file.\n");
+	}
 	section = weston_config_get_section(config, "core", NULL, NULL);
 	weston_config_section_get_string(section, "modules", &modules, "");
 

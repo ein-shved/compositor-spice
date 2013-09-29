@@ -115,9 +115,6 @@ struct motif_wm_hints {
 #define _NET_WM_MOVERESIZE_MOVE_KEYBOARD    10   /* move via keyboard */
 #define _NET_WM_MOVERESIZE_CANCEL           11   /* cancel operation */
 
-#define SEND_EVENT_MASK (0x80)
-#define EVENT_TYPE(event) ((event)->response_type & ~SEND_EVENT_MASK)
-
 struct weston_wm_window {
 	struct weston_wm *wm;
 	xcb_window_t id;
@@ -366,6 +363,8 @@ static void
 weston_wm_window_read_properties(struct weston_wm_window *window)
 {
 	struct weston_wm *wm = window->wm;
+	struct weston_shell_interface *shell_interface =
+		&wm->server->compositor->shell_interface;
 
 #define F(field) offsetof(struct weston_wm_window, field)
 	const struct {
@@ -471,6 +470,9 @@ weston_wm_window_read_properties(struct weston_wm_window *window)
 		}
 		free(reply);
 	}
+
+	if (window->shsurf && window->name)
+		shell_interface->set_title(window->shsurf, window->name);
 }
 
 static void
@@ -875,6 +877,7 @@ weston_wm_handle_unmap_notify(struct weston_wm *wm, xcb_generic_event_t *event)
 	if (window->surface)
 		wl_list_remove(&window->surface_destroy_listener.link);
 	window->surface = NULL;
+	window->shsurf = NULL;
 	xcb_unmap_window(wm->conn, window->frame_id);
 }
 
@@ -1005,7 +1008,7 @@ weston_wm_handle_property_notify(struct weston_wm *wm, xcb_generic_event_t *even
 
 static void
 weston_wm_window_create(struct weston_wm *wm,
-			xcb_window_t id, int width, int height, int override)
+			xcb_window_t id, int width, int height, int x, int y, int override)
 {
 	struct weston_wm_window *window;
 	uint32_t values[1];
@@ -1029,6 +1032,8 @@ weston_wm_window_create(struct weston_wm *wm,
 	window->override_redirect = override;
 	window->width = width;
 	window->height = height;
+	window->x = x;
+	window->y = y;
 
 	geometry_reply = xcb_get_geometry_reply(wm->conn, geometry_cookie, NULL);
 	/* technically we should use XRender and check the visual format's
@@ -1079,6 +1084,7 @@ weston_wm_handle_create_notify(struct weston_wm *wm, xcb_generic_event_t *event)
 
 	weston_wm_window_create(wm, create_notify->window,
 				create_notify->width, create_notify->height,
+				create_notify->x, create_notify->y,
 				create_notify->override_redirect);
 }
 
@@ -1115,6 +1121,7 @@ weston_wm_handle_reparent_notify(struct weston_wm *wm, xcb_generic_event_t *even
 
 	if (reparent_notify->parent == wm->screen->root) {
 		weston_wm_window_create(wm, reparent_notify->window, 10, 10,
+					reparent_notify->x, reparent_notify->y,
 					reparent_notify->override_redirect);
 	} else if (!our_resource(wm, reparent_notify->parent)) {
 		window = hash_table_lookup(wm->window_hash,
@@ -1276,27 +1283,99 @@ enum cursor_type {
 	XWM_CURSOR_LEFT_PTR,
 };
 
-static const char *cursors[] = {
-	"top_side",
-	"bottom_side",
-	"left_side",
-	"right_side",
-	"top_left_corner",
-	"top_right_corner",
+/*
+ * The following correspondences between file names and cursors was copied
+ * from: https://bugs.kde.org/attachment.cgi?id=67313
+ */
+
+static const char *bottom_left_corners[] = {
 	"bottom_left_corner",
+	"sw-resize",
+	"size_bdiag"
+};
+
+static const char *bottom_right_corners[] = {
 	"bottom_right_corner",
-	"left_ptr"
+	"se-resize",
+	"size_fdiag"
+};
+
+static const char *bottom_sides[] = {
+	"bottom_side",
+	"s-resize",
+	"size_ver"
+};
+
+static const char *left_ptrs[] = {
+	"left_ptr",
+	"default",
+	"top_left_arrow",
+	"left-arrow"
+};
+
+static const char *left_sides[] = {
+	"left_side",
+	"w-resize",
+	"size_hor"
+};
+
+static const char *right_sides[] = {
+	"right_side",
+	"e-resize",
+	"size_hor"
+};
+
+static const char *top_left_corners[] = {
+	"top_left_corner",
+	"nw-resize",
+	"size_fdiag"
+};
+
+static const char *top_right_corners[] = {
+	"top_right_corner",
+	"ne-resize",
+	"size_bdiag"
+};
+
+static const char *top_sides[] = {
+	"top_side",
+	"n-resize",
+	"size_ver"
+};
+
+struct cursor_alternatives {
+	const char **names;
+	size_t count;
+};
+
+static const struct cursor_alternatives cursors[] = {
+	{top_sides, ARRAY_LENGTH(top_sides)},
+	{bottom_sides, ARRAY_LENGTH(bottom_sides)},
+	{left_sides, ARRAY_LENGTH(left_sides)},
+	{right_sides, ARRAY_LENGTH(right_sides)},
+	{top_left_corners, ARRAY_LENGTH(top_left_corners)},
+	{top_right_corners, ARRAY_LENGTH(top_right_corners)},
+	{bottom_left_corners, ARRAY_LENGTH(bottom_left_corners)},
+	{bottom_right_corners, ARRAY_LENGTH(bottom_right_corners)},
+	{left_ptrs, ARRAY_LENGTH(left_ptrs)},
 };
 
 static void
 weston_wm_create_cursors(struct weston_wm *wm)
 {
+	const char *name;
 	int i, count = ARRAY_LENGTH(cursors);
+	size_t j;
 
 	wm->cursors = malloc(count * sizeof(xcb_cursor_t));
 	for (i = 0; i < count; i++) {
-		wm->cursors[i] =
-			xcb_cursor_library_load_cursor(wm, cursors[i]);
+		for (j = 0; j < cursors[i].count; j++) {
+			name = cursors[i].names[j];
+			wm->cursors[i] =
+				xcb_cursor_library_load_cursor(wm, name);
+			if (wm->cursors[i] != (xcb_cursor_t)-1)
+				break;
+		}
 	}
 
 	wm->last_cursor = -1;
@@ -1469,6 +1548,12 @@ weston_wm_handle_event(int fd, uint32_t mask, void *data)
 			continue;
 		}
 
+		if (weston_wm_handle_dnd_event(wm, event)) {
+			free(event);
+			count++;
+			continue;
+		}
+
 		switch (EVENT_TYPE(event)) {
 		case XCB_BUTTON_PRESS:
 		case XCB_BUTTON_RELEASE:
@@ -1615,6 +1700,15 @@ weston_wm_get_resources(struct weston_wm *wm)
 		{ "STRING",		F(atom.string) },
 		{ "text/plain;charset=utf-8",	F(atom.text_plain_utf8) },
 		{ "text/plain",		F(atom.text_plain) },
+		{ "XdndSelection",	F(atom.xdnd_selection) },
+		{ "XdndAware",		F(atom.xdnd_aware) },
+		{ "XdndEnter",		F(atom.xdnd_enter) },
+		{ "XdndLeave",		F(atom.xdnd_leave) },
+		{ "XdndDrop",		F(atom.xdnd_drop) },
+		{ "XdndStatus",		F(atom.xdnd_status) },
+		{ "XdndFinished",	F(atom.xdnd_finished) },
+		{ "XdndTypeList",	F(atom.xdnd_type_list) },
+		{ "XdndActionCopy",	F(atom.xdnd_action_copy) }
 	};
 #undef F
 
@@ -1812,6 +1906,8 @@ weston_wm_create(struct weston_xserver *wxs)
 
 	weston_wm_selection_init(wm);
 
+	weston_wm_dnd_init(wm);
+
 	xcb_flush(wm->conn);
 
 	wm->activate_listener.notify = weston_wm_window_activate;
@@ -1857,6 +1953,9 @@ surface_destroy(struct wl_listener *listener, void *data)
 
 	wm_log("surface for xid %d destroyed\n", window->id);
 
+	/* This should have been freed by the shell.
+       Don't try to use it later. */
+	window->shsurf = NULL;
 	window->surface = NULL;
 }
 
@@ -2011,6 +2110,9 @@ xserver_map_shell_surface(struct weston_wm *wm,
 						      window->surface,
 						      &shell_client);
 
+	if (window->name)
+		shell_interface->set_title(window->shsurf, window->name);
+
 	if (window->fullscreen) {
 		window->saved_width = window->width;
 		window->saved_height = window->height;
@@ -2023,7 +2125,7 @@ xserver_map_shell_surface(struct weston_wm *wm,
 		shell_interface->set_fullscreen(window->shsurf,
 						WL_SHELL_SURFACE_FULLSCREEN_METHOD_DEFAULT,
 						0, output);
-	} else if (!window->override_redirect) {
+	} else if (!window->override_redirect && !window->transient_for) {
 		shell_interface->set_toplevel(window->shsurf);
 		return;
 	} else {
@@ -2056,6 +2158,12 @@ xserver_set_window_id(struct wl_client *client, struct wl_resource *resource,
 	wm_log("set_window_id %d for surface %p\n", id, surface);
 
 	weston_wm_window_read_properties(window);
+
+	/* A weston_wm_window may have many different surfaces assigned
+	 * throughout its life, so we must make sure to remove the listener
+	 * from the old surface signal list. */
+	if (window->surface)
+		wl_list_remove(&window->surface_destroy_listener.link);
 
 	window->surface = (struct weston_surface *) surface;
 	window->surface_destroy_listener.notify = surface_destroy;

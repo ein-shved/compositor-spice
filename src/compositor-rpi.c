@@ -44,6 +44,7 @@
 #include "compositor.h"
 #include "rpi-renderer.h"
 #include "evdev.h"
+#include "launcher-util.h"
 
 #if 0
 #define DBG(...) \
@@ -86,7 +87,7 @@ struct rpi_compositor {
 	uint32_t prev_state;
 
 	struct udev *udev;
-	struct tty *tty;
+	struct wl_listener session_listener;
 
 	int single_buffer;
 };
@@ -368,8 +369,7 @@ rpi_output_create(struct rpi_compositor *compositor, uint32_t transform)
 	wl_list_init(&output->base.mode_list);
 	wl_list_insert(&output->base.mode_list, &output->mode.link);
 
-	output->base.current = &output->mode;
-	output->base.origin = &output->mode;
+	output->base.current_mode = &output->mode;
 	output->base.subpixel = WL_OUTPUT_SUBPIXEL_UNKNOWN;
 	output->base.make = "unknown";
 	output->base.model = "unknown";
@@ -655,22 +655,21 @@ rpi_compositor_destroy(struct weston_compositor *base)
 	weston_compositor_shutdown(&compositor->base);
 
 	compositor->base.renderer->destroy(&compositor->base);
-	tty_destroy(compositor->tty);
+	weston_launcher_destroy(compositor->base.launcher);
 
 	bcm_host_deinit();
 	free(compositor);
 }
 
 static void
-vt_func(struct weston_compositor *base, int event)
+session_notify(struct wl_listener *listener, void *data)
 {
-	struct rpi_compositor *compositor = to_rpi_compositor(base);
+	struct rpi_compositor *compositor = data;
 	struct weston_seat *seat;
 	struct weston_output *output;
 
-	switch (event) {
-	case TTY_ENTER_VT:
-		weston_log("entering VT\n");
+	if (compositor->base.session_active) {
+		weston_log("activating session\n");
 		compositor->base.focus = 1;
 		compositor->base.state = compositor->prev_state;
 		weston_compositor_damage_all(&compositor->base);
@@ -678,9 +677,8 @@ vt_func(struct weston_compositor *base, int event)
 			evdev_add_devices(compositor->udev, seat);
 			evdev_enable_udev_monitor(compositor->udev, seat);
 		}
-		break;
-	case TTY_LEAVE_VT:
-		weston_log("leaving VT\n");
+	} else {
+		weston_log("deactivating session\n");
 		wl_list_for_each(seat, &compositor->base.seat_list, link) {
 			evdev_disable_udev_monitor(seat);
 			evdev_remove_devices(seat);
@@ -702,25 +700,21 @@ vt_func(struct weston_compositor *base, int event)
 				 &compositor->base.output_list, link) {
 			output->repaint_needed = 0;
 		}
-
-		break;
 	};
 }
 
 static void
-rpi_restore(struct weston_compositor *base)
+rpi_restore(struct weston_compositor *compositor)
 {
-	struct rpi_compositor *compositor = to_rpi_compositor(base);
-
-	tty_reset(compositor->tty);
+	weston_launcher_restore(compositor->launcher);
 }
 
 static void
 switch_vt_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
 {
-	struct rpi_compositor *ec = data;
+	struct weston_compositor *compositor = data;
 
-	tty_activate_vt(ec->tty, key - KEY_F1 + 1);
+	weston_launcher_activate_vt(compositor->launcher, key - KEY_F1 + 1);
 }
 
 struct rpi_parameters {
@@ -754,8 +748,11 @@ rpi_compositor_create(struct wl_display *display, int *argc, char *argv[],
 		goto out_compositor;
 	}
 
-	compositor->tty = tty_create(&compositor->base, vt_func, param->tty);
-	if (!compositor->tty) {
+	compositor->session_listener.notify = session_notify;
+	wl_signal_add(&compositor->base.session_signal,
+		      &compositor ->session_listener);
+	compositor->base.launcher = weston_launcher_connect(&compositor->base);
+	if (!compositor->base.launcher) {
 		weston_log("Failed to initialize tty.\n");
 		goto out_udev;
 	}
@@ -785,7 +782,7 @@ rpi_compositor_create(struct wl_display *display, int *argc, char *argv[],
 	bcm_host_init();
 
 	if (rpi_renderer_create(&compositor->base, &param->renderer) < 0)
-		goto out_tty;
+		goto out_launcher;
 
 	if (rpi_output_create(compositor, param->output_transform) < 0)
 		goto out_renderer;
@@ -797,8 +794,8 @@ rpi_compositor_create(struct wl_display *display, int *argc, char *argv[],
 out_renderer:
 	compositor->base.renderer->destroy(&compositor->base);
 
-out_tty:
-	tty_destroy(compositor->tty);
+out_launcher:
+	weston_launcher_destroy(compositor->base.launcher);
 
 out_udev:
 	udev_unref(compositor->udev);

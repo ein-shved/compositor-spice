@@ -1307,22 +1307,18 @@ static const struct cursor_alternatives cursors[] = {
 static void
 create_cursors(struct display *display)
 {
-	int config_fd;
+	struct weston_config *config;
+	struct weston_config_section *s;
+	int size;
 	char *theme = NULL;
-	unsigned int size = 32;
 	unsigned int i, j;
 	struct wl_cursor *cursor;
-	struct config_key shell_keys[] = {
-		{ "cursor-theme", CONFIG_KEY_STRING, &theme },
-		{ "cursor-size", CONFIG_KEY_UNSIGNED_INTEGER, &size },
-	};
-	struct config_section cs[] = {
-		{ "shell", shell_keys, ARRAY_LENGTH(shell_keys), NULL },
-	};
 
-	config_fd = open_config_file("weston.ini");
-	parse_config_file(config_fd, cs, ARRAY_LENGTH(cs), NULL);
-	close(config_fd);
+	config = weston_config_parse("weston.ini");
+	s = weston_config_get_section(config, "shell", NULL, NULL);
+	weston_config_section_get_string(s, "cursor-theme", &theme, NULL);
+	weston_config_section_get_int(s, "cursor-size", &size, 32);
+	weston_config_destroy(config);
 
 	display->cursor_theme = wl_cursor_theme_load(theme, size, display->shm);
 	display->cursors =
@@ -3794,6 +3790,16 @@ input_receive_drag_data(struct input *input, const char *mime_type,
 	data_offer_receive_data(input->drag_offer, mime_type, func, data);
 	input->drag_offer->x = input->sx;
 	input->drag_offer->y = input->sy;
+}
+
+int
+input_receive_drag_data_to_fd(struct input *input,
+			      const char *mime_type, int fd)
+{
+	if (input->drag_offer)
+		wl_data_offer_receive(input->drag_offer->offer, mime_type, fd);
+
+	return 0;
 }
 
 int

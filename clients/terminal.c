@@ -44,9 +44,9 @@
 #include "window.h"
 
 static int option_fullscreen;
-static char *option_font = "mono";
-static int option_font_size = 14;
-static char *option_term = "xterm";
+static char *option_font;
+static int option_font_size;
+static char *option_term;
 static char *option_shell;
 
 static struct wl_list terminal_list;
@@ -762,6 +762,11 @@ terminal_resize_cells(struct terminal *terminal, int width, int height)
 
 		if (terminal->height > height) {
 			total_rows = height;
+			i = 1 + terminal->row - height;
+			if (i > 0) {
+			    terminal->start = (terminal->start + i) % terminal->height;
+			    terminal->row = terminal->row - i;
+			}
 		} else {
 			total_rows = terminal->height;
 		}
@@ -789,6 +794,7 @@ terminal_resize_cells(struct terminal *terminal, int width, int height)
 	terminal->data = data;
 	terminal->data_attr = data_attr;
 	terminal->tab_ruler = tab_ruler;
+	terminal->start = 0;
 	terminal_init_tabs(terminal);
 
 	/* Update the window size */
@@ -1228,8 +1234,11 @@ handle_osc(struct terminal *terminal)
 	case 2: /* Window title*/
 		window_set_title(terminal->window, p);
 		break;
+	case 7: /* shell cwd as uri */
+		break;
 	default:
-		fprintf(stderr, "Unknown OSC escape code %d\n", code);
+		fprintf(stderr, "Unknown OSC escape code %d, text %s\n",
+			code, p);
 		break;
 	}
 }
@@ -2128,6 +2137,37 @@ static const struct wl_data_source_listener data_source_listener = {
 	data_source_cancelled
 };
 
+static const char text_mime_type[] = "text/plain;charset=utf-8";
+
+static void
+data_handler(struct window *window,
+	     struct input *input,
+	     float x, float y, const char **types, void *data)
+{
+	int i, has_text = 0;
+
+	if (!types)
+		return;
+	for (i = 0; types[i]; i++)
+		if (strcmp(types[i], text_mime_type) == 0)
+			has_text = 1;
+
+	if (!has_text) {
+		input_accept(input, NULL);
+	} else {
+		input_accept(input, text_mime_type);
+	}
+}
+
+static void
+drop_handler(struct window *window, struct input *input,
+	     int32_t x, int32_t y, void *data)
+{
+	struct terminal *terminal = data;
+
+	input_receive_drag_data_to_fd(input, text_mime_type, terminal->master);
+}
+
 static void
 fullscreen_handler(struct window *window, void *data)
 {
@@ -2630,6 +2670,9 @@ terminal_create(struct display *display)
 	window_set_output_handler(terminal->window, output_handler);
 	window_set_close_handler(terminal->window, close_handler);
 
+	window_set_data_handler(terminal->window, data_handler);
+	window_set_drop_handler(terminal->window, drop_handler);
+
 	widget_set_redraw_handler(terminal->widget, redraw_handler);
 	widget_set_resize_handler(terminal->widget, resize_handler);
 	widget_set_button_handler(terminal->widget, button_handler);
@@ -2738,17 +2781,6 @@ terminal_run(struct terminal *terminal, const char *path)
 	return 0;
 }
 
-static const struct config_key terminal_config_keys[] = {
-	{ "font", CONFIG_KEY_STRING, &option_font },
-	{ "font-size", CONFIG_KEY_INTEGER, &option_font_size },
-	{ "term", CONFIG_KEY_STRING, &option_term },
-};
-
-static const struct config_section config_sections[] = {
-	{ "terminal",
-	  terminal_config_keys, ARRAY_LENGTH(terminal_config_keys) },
-};
-
 static const struct weston_option terminal_options[] = {
 	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
 	{ WESTON_OPTION_STRING, "font", 0, &option_font },
@@ -2759,7 +2791,8 @@ int main(int argc, char *argv[])
 {
 	struct display *d;
 	struct terminal *terminal;
-	int config_fd;
+	struct weston_config *config;
+	struct weston_config_section *s;
 
 	/* as wcwidth is locale-dependent,
 	   wcwidth needs setlocale call to function properly. */
@@ -2769,14 +2802,12 @@ int main(int argc, char *argv[])
 	if (!option_shell)
 		option_shell = "/bin/bash";
 
-	config_fd = open_config_file("weston.ini");
-	parse_config_file(config_fd,
-			  config_sections, ARRAY_LENGTH(config_sections),
-			  NULL);
-	close(config_fd);
-
-	parse_options(terminal_options,
-		      ARRAY_LENGTH(terminal_options), &argc, argv);
+	config = weston_config_parse("weston.ini");
+	s = weston_config_get_section(config, "terminal", NULL, NULL);
+	weston_config_section_get_string(s, "font", &option_font, "mono");
+	weston_config_section_get_int(s, "font-size", &option_font_size, 14);
+	weston_config_section_get_string(s, "term", &option_term, "xterm");
+	weston_config_destroy(config);
 
 	d = display_create(&argc, argv);
 	if (d == NULL) {

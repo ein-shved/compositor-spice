@@ -1,5 +1,5 @@
 /*
- * Copyright © 2012 Benjamin Franzke
+ * Copyright © 2012 Intel Corporation
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -19,30 +19,47 @@
  * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+#ifndef _WESTON_VERTEX_CLIPPING_H
+#define _WESTON_VERTEX_CLIPPING_H
 
-#ifndef _WESTON_LAUNCHER_UTIL_H_
-#define _WESTON_LAUNCHER_UTIL_H_
+#include <GLES2/gl2.h>
 
-#include "config.h"
+struct polygon8 {
+	GLfloat x[8];
+	GLfloat y[8];
+	int n;
+};
 
-#include "compositor.h"
+struct clip_context {
+	struct {
+		GLfloat x;
+		GLfloat y;
+	} prev;
 
-struct weston_launcher;
+	struct {
+		GLfloat x1, y1;
+		GLfloat x2, y2;
+	} clip;
 
-struct weston_launcher *
-weston_launcher_connect(struct weston_compositor *compositor);
+	struct {
+		GLfloat *x;
+		GLfloat *y;
+	} vertices;
+};
 
-void
-weston_launcher_destroy(struct weston_launcher *launcher);
+GLfloat
+float_difference(GLfloat a, GLfloat b);
 
 int
-weston_launcher_open(struct weston_launcher *launcher,
-		     const char *path, int flags);
+clip_simple(struct clip_context *ctx,
+	    struct polygon8 *surf,
+	    GLfloat *ex,
+	    GLfloat *ey);
 
 int
-weston_launcher_activate_vt(struct weston_launcher *launcher, int vt);
-
-void
-weston_launcher_restore(struct weston_launcher *launcher);
+clip_transformed(struct clip_context *ctx,
+		 struct polygon8 *surf,
+		 GLfloat *ex,
+		 GLfloat *ey);\
 
 #endif

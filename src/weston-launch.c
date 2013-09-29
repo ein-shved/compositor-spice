@@ -42,9 +42,9 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#include <termios.h>
 #include <linux/vt.h>
 #include <linux/major.h>
+#include <linux/kd.h>
 
 #include <pwd.h>
 #include <grp.h>
@@ -58,6 +58,12 @@
 
 #include "weston-launch.h"
 
+#define DRM_MAJOR 226
+
+#ifndef KDSKBMUTE
+#define KDSKBMUTE	0x4B51
+#endif
+
 #define MAX_ARGV_SIZE 256
 
 struct weston_launch {
@@ -66,6 +72,8 @@ struct weston_launch {
 	int tty;
 	int ttynr;
 	int sock[2];
+	int drm_fd;
+	int kb_mode;
 	struct passwd *pw;
 
 	int signalfd;
@@ -190,10 +198,11 @@ setup_pam(struct weston_launch *wl)
 static int
 setup_launcher_socket(struct weston_launch *wl)
 {
-	if (socketpair(AF_LOCAL, SOCK_DGRAM, 0, wl->sock) < 0)
+	if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, wl->sock) < 0)
 		error(1, errno, "socketpair failed");
 	
-	fcntl(wl->sock[0], F_SETFD, O_CLOEXEC);
+	if (fcntl(wl->sock[0], F_SETFD, FD_CLOEXEC) < 0)
+		error(1, errno, "fcntl failed");
 
 	return 0;
 }
@@ -220,6 +229,8 @@ setup_signals(struct weston_launch *wl)
 	sigaddset(&mask, SIGCHLD);
 	sigaddset(&mask, SIGINT);
 	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGUSR1);
+	sigaddset(&mask, SIGUSR2);
 	ret = sigprocmask(SIG_BLOCK, &mask, NULL);
 	assert(ret == 0);
 
@@ -240,48 +251,15 @@ setenv_fd(const char *env, int fd)
 }
 
 static int
-handle_setmaster(struct weston_launch *wl, struct msghdr *msg, ssize_t len)
+send_reply(struct weston_launch *wl, int reply)
 {
-	int ret = -1;
-	struct cmsghdr *cmsg;
-	struct weston_launcher_set_master *message;
-	union cmsg_data *data;
+	int len;
 
-	if (len != sizeof(*message)) {
-		error(0, 0, "missing value in setmaster request");
-		goto out;
-	}
-
-	message = msg->msg_iov->iov_base;
-
-	cmsg = CMSG_FIRSTHDR(msg);
-	if (!cmsg ||
-	    cmsg->cmsg_level != SOL_SOCKET ||
-	    cmsg->cmsg_type != SCM_RIGHTS) {
-		error(0, 0, "invalid control message");
-		goto out;
-	}
-
-	data = (union cmsg_data *) CMSG_DATA(cmsg);
-	if (data->fd == -1) {
-		error(0, 0, "missing drm fd in socket request");
-		goto out;
-	}
-
-	if (message->set_master)
-		ret = drmSetMaster(data->fd);
-	else
-		ret = drmDropMaster(data->fd);
-
-	close(data->fd);
-out:
 	do {
-		len = send(wl->sock[0], &ret, sizeof ret, 0);
+		len = send(wl->sock[0], &reply, sizeof reply, 0);
 	} while (len < 0 && errno == EINTR);
-	if (len < 0)
-		return -1;
 
-	return 0;
+	return len;
 }
 
 static int
@@ -303,9 +281,6 @@ handle_open(struct weston_launch *wl, struct msghdr *msg, ssize_t len)
 	/* Ensure path is null-terminated */
 	((char *) message)[len-1] = '\0';
 
-	if (stat(message->path, &s) < 0)
-		goto err0;
-
 	fd = open(message->path, message->flags);
 	if (fd < 0) {
 		fprintf(stderr, "Error opening device %s: %m\n",
@@ -313,10 +288,18 @@ handle_open(struct weston_launch *wl, struct msghdr *msg, ssize_t len)
 		goto err0;
 	}
 
-	if (major(s.st_rdev) != INPUT_MAJOR) {
+	if (fstat(fd, &s) < 0) {
 		close(fd);
 		fd = -1;
-		fprintf(stderr, "Device %s is not an input device\n",
+		fprintf(stderr, "Failed to stat %s\n", message->path);
+		goto err0;
+	}
+
+	if (major(s.st_rdev) != INPUT_MAJOR &&
+	    major(s.st_rdev) != DRM_MAJOR) {
+		close(fd);
+		fd = -1;
+		fprintf(stderr, "Device %s is not an input or drm device\n",
 			message->path);
 		goto err0;
 	}
@@ -349,6 +332,9 @@ err0:
 
 	if (len < 0)
 		return -1;
+
+	if (major(s.st_rdev) == DRM_MAJOR)
+		wl->drm_fd = fd;
 
 	return 0;
 }
@@ -384,9 +370,6 @@ handle_socket_msg(struct weston_launch *wl)
 	case WESTON_LAUNCHER_OPEN:
 		ret = handle_open(wl, &msg, len);
 		break;
-	case WESTON_LAUNCHER_DRM_SET_MASTER:
-		ret = handle_setmaster(wl, &msg, len);
-		break;
 	}
 
 	return ret;
@@ -395,6 +378,7 @@ handle_socket_msg(struct weston_launch *wl)
 static void
 quit(struct weston_launch *wl, int status)
 {
+	struct vt_mode mode = { 0 };
 	int err;
 
 	close(wl->signalfd);
@@ -407,6 +391,17 @@ quit(struct weston_launch *wl, int status)
 				err, pam_strerror(wl->ph, err));
 		pam_end(wl->ph, err);
 	}
+
+	if (ioctl(wl->tty, KDSKBMUTE, 0) &&
+	    ioctl(wl->tty, KDSKBMODE, wl->kb_mode))
+		fprintf(stderr, "failed to restore keyboard mode: %m\n");
+
+	if (ioctl(wl->tty, KDSETMODE, KD_TEXT))
+		fprintf(stderr, "failed to set KD_TEXT mode on tty: %m\n");
+
+	mode.mode = VT_AUTO;
+	if (ioctl(wl->tty, VT_SETMODE, &mode) < 0)
+		fprintf(stderr, "could not reset vt handling\n");
 
 	exit(status);
 }
@@ -447,6 +442,16 @@ handle_signal(struct weston_launch *wl)
 		if (wl->child)
 			kill(wl->child, sig.ssi_signo);
 		break;
+	case SIGUSR1:
+		send_reply(wl, WESTON_LAUNCHER_DEACTIVATE);
+		drmDropMaster(wl->drm_fd);
+		ioctl(wl->tty, VT_RELDISP, 1);
+		break;
+	case SIGUSR2:
+		ioctl(wl->tty, VT_RELDISP, VT_ACKACQ);
+		drmSetMaster(wl->drm_fd);
+		send_reply(wl, WESTON_LAUNCHER_ACTIVATE);
+		break;
 	default:
 		return -1;
 	}
@@ -458,6 +463,7 @@ static int
 setup_tty(struct weston_launch *wl, const char *tty)
 {
 	struct stat buf;
+	struct vt_mode mode = { 0 };
 	char *t;
 
 	if (!wl->new_user) {
@@ -495,6 +501,22 @@ setup_tty(struct weston_launch *wl, const char *tty)
 
 		wl->ttynr = minor(buf.st_rdev);
 	}
+
+	if (ioctl(wl->tty, KDGKBMODE, &wl->kb_mode))
+		error(1, errno, "failed to get current keyboard mode: %m\n");
+
+	if (ioctl(wl->tty, KDSKBMUTE, 1) &&
+	    ioctl(wl->tty, KDSKBMODE, K_OFF))
+		error(1, errno, "failed to set K_OFF keyboard mode: %m\n");
+
+	if (ioctl(wl->tty, KDSETMODE, KD_GRAPHICS))
+		error(1, errno, "failed to set KD_GRAPHICS mode on tty: %m\n");
+
+	mode.mode = VT_PROCESS;
+	mode.relsig = SIGUSR1;
+	mode.acqsig = SIGUSR2;
+	if (ioctl(wl->tty, VT_SETMODE, &mode) < 0)
+		error(1, errno, "failed to take control of vt handling\n");
 
 	return 0;
 }
@@ -557,9 +579,7 @@ launch_compositor(struct weston_launch *wl, int argc, char *argv[])
 
 	drop_privileges(wl);
 
-	if (wl->tty != STDIN_FILENO)
-		setenv_fd("WESTON_TTY_FD", wl->tty);
-
+	setenv_fd("WESTON_TTY_FD", wl->tty);
 	setenv_fd("WESTON_LAUNCHER_SOCK", wl->sock[1]);
 
 	unsetenv("DISPLAY");
