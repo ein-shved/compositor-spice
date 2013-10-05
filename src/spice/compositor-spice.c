@@ -167,7 +167,7 @@ spice_create_output ( struct spice_compositor *c,
 	wl_list_init(&output->base.mode_list);
 	wl_list_insert(&output->base.mode_list, &output->mode.link);
 
-    output->base.origin         = output->base.current;
+    //output->base.origin         = output->base.current;
     output->base.start_repaint_loop = spice_output_start_repaint_loop;
     output->base.repaint            = spice_output_repaint;
     output->base.destroy            = spice_output_destroy;
@@ -176,9 +176,9 @@ spice_create_output ( struct spice_compositor *c,
 	output->base.set_dpms           = NULL;
 	output->base.switch_mode        = NULL;
     
-    output->base.current    = &output->mode;
-    output->base.make       = "none";
-	output->base.model      = "none";
+    output->base.current_mode       = &output->mode;
+    output->base.make               = "none";
+	output->base.model              = "none";
 
     weston_output_init ( &output->base, &c->base,
                 x, y, width, height, transform, 1 );

@@ -6,7 +6,8 @@ AM_CPPFLAGS =					\
 	-DDATADIR='"$(datadir)"'		\
 	-DMODULEDIR='"$(moduledir)"'		\
 	-DLIBEXECDIR='"$(libexecdir)"'		\
-	-DIN_WESTON
+	-DIN_WESTON                         \
+    -g
 
 weston_LDFLAGS = -export-dynamic
 weston_CFLAGS = $(GCC_CFLAGS) $(COMPOSITOR_CFLAGS) $(LIBUNWIND_CFLAGS)
@@ -55,6 +56,13 @@ weston_SOURCES +=				\
 	gl-renderer.c				\
 	vertex-clipping.c			\
 	vertex-clipping.h
+endif
+
+if ENABLE_MONITOR_RENDERER
+weston_SOURCES +=               \
+    monitor-renderer.h          \
+    monitor-renderer.c          
+weston_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
 endif
 
 git-version.h : .FORCE
@@ -137,7 +145,12 @@ x11_backend_la_CFLAGS =				\
 	$(X11_COMPOSITOR_CFLAGS)		\
 	$(GCC_CFLAGS)
 x11_backend_la_SOURCES = compositor-x11.c
+
+if ENABLE_MONITOR_RENDERER
+x11_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
 endif
+endif
+
 
 if ENABLE_DRM_COMPOSITOR
 drm_backend = drm-backend.la
@@ -165,6 +178,10 @@ drm_backend_la_SOURCES += vaapi-recorder.c vaapi-recorder.h
 drm_backend_la_LIBADD += $(LIBVA_LIBS)
 drm_backend_la_CFLAGS += $(LIBVA_CFLAGS)
 endif
+
+if ENABLE_MONITOR_RENDERER
+drm_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_WAYLAND_COMPOSITOR
@@ -179,6 +196,10 @@ wayland_backend_la_CFLAGS =			\
 	$(WAYLAND_COMPOSITOR_CFLAGS)		\
 	$(GCC_CFLAGS)
 wayland_backend_la_SOURCES = compositor-wayland.c
+
+if ENABLE_MONITOR_RENDERER
+wayland_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_RPI_COMPOSITOR
@@ -214,6 +235,10 @@ headless_backend_la_CFLAGS =			\
 	$(COMPOSITOR_CFLAGS)			\
 	$(GCC_CFLAGS)
 headless_backend_la_SOURCES = compositor-headless.c
+
+if ENABLE_MONITOR_RENDERER
+headless_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_FBDEV_COMPOSITOR
@@ -237,6 +262,10 @@ fbdev_backend_la_SOURCES = \
 	evdev-touchpad.c \
 	launcher-util.c \
 	launcher-util.h
+
+if ENABLE_MONITOR_RENDERER
+fbdev_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_RDP_COMPOSITOR
@@ -250,6 +279,10 @@ rdp_backend_la_CFLAGS =			\
 	$(RDP_COMPOSITOR_CFLAGS) \
 	$(GCC_CFLAGS)
 rdp_backend_la_SOURCES = compositor-rdp.c
+
+if ENABLE_MONITOR_RENDERER
+rdp_backend_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_DESKTOP_SHELL
@@ -262,6 +295,10 @@ desktop_shell_la_SOURCES =			\
 	shell.c					\
 	desktop-shell-protocol.c		\
 	desktop-shell-server-protocol.h
+
+if ENABLE_MONITOR_RENDERER
+desktop_shell_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if ENABLE_TABLET_SHELL
@@ -273,6 +310,10 @@ tablet_shell_la_SOURCES =			\
 	tablet-shell.c				\
 	tablet-shell-protocol.c			\
 	tablet-shell-server-protocol.h
+
+if ENABLE_MONITOR_RENDERER
+tablet_shell_la_LDFLAGS +=   -Wl,--wrap=pixman_renderer_init
+endif
 endif
 
 if HAVE_LCMS

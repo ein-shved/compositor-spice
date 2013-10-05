@@ -258,6 +258,12 @@ if test x$enable_spice_compositor = xyes; then
   AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
 fi
 
+AC_ARG_ENABLE(monitor-renderer, [  --enable-monitor-renderer],,
+              enable_monitor_renderer=no)
+AM_CONDITIONAL(ENABLE_MONITOR_RENDERER, test x$enable_monitor_renderer = xyes)
+if test x$enable_monitor_renderer = xyes; then
+	AC_DEFINE([BUILD_MONITOR_RENDERER], [1], [Build renderer dump wrapper])
+fi
 
 
 PKG_CHECK_MODULES(PIXMAN, [pixman-1])
@@ -507,6 +513,7 @@ AC_MSG_RESULT([
 	FBDEV Compositor		${enable_fbdev_compositor}
 	RDP Compositor			${enable_rdp_compositor}
 	Spice remote compositor		${enable_spice_compositor}
+	Monitor renderer wrapper	${enable_monitor_renderer}
 
 	Raspberry Pi BCM headers	${have_bcm_host}
 
