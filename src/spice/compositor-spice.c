@@ -77,12 +77,12 @@ spice_output_repaint (struct weston_output *output_base,
     dprint (3, "called");
 
     output->base.compositor->renderer->repaint_output (output_base, damage);
-    
+
     if (output->full_image_id == 0) {
         output->full_image_id = spice_create_image(c);
     }
 
-    spice_paint_image (c, output->full_image_id, 
+    spice_paint_image (c, output->full_image_id,
             output_base->x,
             output_base->y,
             output_base->width,
@@ -99,7 +99,7 @@ spice_output_destroy ( struct weston_output *output_base)
     struct spice_compositor *c = output->compositor;
 
     c->core->timer_cancel (output->wakeup_timer);
-    c->core->timer_remove (output->wakeup_timer);  
+    c->core->timer_remove (output->wakeup_timer);
 
     free ( pixman_image_get_destroy_data(output->full_image));
     free (output->full_image);
@@ -111,11 +111,11 @@ on_wakeup (void *opaque) {
     struct spice_compositor *c = output->compositor;
     uint32_t msec;
     struct timeval tv;
-	
+
 	gettimeofday(&tv, NULL);
 	msec = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
-    c->worker->wakeup(c->worker);    
+    c->worker->wakeup(c->worker);
     c->core->timer_start (output->wakeup_timer, 1);
 
     weston_output_finish_frame (&output->base, msec);
@@ -175,7 +175,7 @@ spice_create_output ( struct spice_compositor *c,
 	output->base.set_backlight      = NULL;
 	output->base.set_dpms           = NULL;
 	output->base.switch_mode        = NULL;
-    
+
     output->base.current_mode       = &output->mode;
     output->base.make               = "none";
 	output->base.model              = "none";
@@ -211,13 +211,13 @@ err_core_interface:
     return NULL;
 }
 
-static void 
-weston_spice_server_new ( struct spice_compositor *c, 
+static void
+weston_spice_server_new ( struct spice_compositor *c,
         const struct spice_server_ops *ops )
 {
     //Init spice server
     c->spice_server = spice_server_new();
-    
+
     spice_server_set_addr ( c->spice_server,
                             ops->addr, ops->flags );
     spice_server_set_port ( c->spice_server,
@@ -226,7 +226,7 @@ weston_spice_server_new ( struct spice_compositor *c,
         spice_server_set_noauth ( c->spice_server );
     }
 
-    //TODO set another spice server options here   
+    //TODO set another spice server options here
 
     spice_server_init (c->spice_server, c->core);
 
@@ -236,11 +236,11 @@ weston_spice_server_new ( struct spice_compositor *c,
 }
 
 static int
-weston_spice_input_init ( struct spice_compositor *c, 
+weston_spice_input_init ( struct spice_compositor *c,
         const struct spice_server_ops *ops )
 {
     weston_seat_init (&c->core_seat, &c->base, "default");
-    
+
     //mouse interface
     weston_spice_mouse_init (c);
 
@@ -251,7 +251,7 @@ weston_spice_input_init ( struct spice_compositor *c,
     return 0;
 }
 
-static void 
+static void
 spice_destroy (struct weston_compositor *ec)
 {
     struct spice_compositor *c = (struct spice_compositor*) ec;
@@ -280,9 +280,9 @@ spice_restore (struct weston_compositor *compositor_base)
 }
 
 static struct spice_compositor *
-spice_compositor_create ( struct wl_display *display, 
-        const struct spice_server_ops *ops, 
-        int *argc, char *argv[], 
+spice_compositor_create ( struct wl_display *display,
+        const struct spice_server_ops *ops,
+        int *argc, char *argv[],
         struct weston_config *config )
 {
     struct spice_compositor *c;
@@ -293,20 +293,20 @@ spice_compositor_create ( struct wl_display *display,
     }
     memset (c, 0, sizeof *c);
 
-    if (weston_compositor_init (&c->base, display, argc, argv, config) < 0) 
+    if (weston_compositor_init (&c->base, display, argc, argv, config) < 0)
     {
         goto err_weston_init;
     }
-    
+
     c->core = basic_event_loop_init(display);
     weston_spice_server_new (c, ops);
-    
+
     weston_log ("Spice server is up on %s:%d\n", ops->addr, ops->port);
 
     c->base.wl_display = display;
     if ( pixman_renderer_init (&c->base) < 0) {
         goto err_init_pixman;
-    } 
+    }
     weston_log ("Using %s renderer\n", "pixman");
 
     c->base.destroy = spice_destroy;
