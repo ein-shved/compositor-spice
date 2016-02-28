@@ -2,23 +2,26 @@
  * Copyright © 2008 Kristian Høgsberg
  * Copyright © 2012 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "config.h"
@@ -28,13 +31,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <wayland-util.h>
 #include <cairo.h>
 #include "cairo-util.h"
 
+#include "shared/helpers.h"
 #include "image-loader.h"
 #include "config-parser.h"
-
-#define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
 
 void
 surface_flush_device(cairo_surface_t *surface)
@@ -136,18 +139,27 @@ blur_surface(cairo_surface_t *surface, int margin)
 }
 
 void
-tile_mask(cairo_t *cr, cairo_surface_t *surface,
-	  int x, int y, int width, int height, int margin, int top_margin)
+render_shadow(cairo_t *cr, cairo_surface_t *surface,
+	      int x, int y, int width, int height, int margin, int top_margin)
 {
 	cairo_pattern_t *pattern;
 	cairo_matrix_t matrix;
-	int i, fx, fy, vmargin;
+	int i, fx, fy, shadow_height, shadow_width;
 
+	cairo_set_source_rgba(cr, 0, 0, 0, 0.45);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 	pattern = cairo_pattern_create_for_surface (surface);
 	cairo_pattern_set_filter(pattern, CAIRO_FILTER_NEAREST);
 
 	for (i = 0; i < 4; i++) {
+		/* when fy is set, then we are working with lower corners,
+		 * when fx is set, then we are working with right corners
+		 *
+		 *  00 ------- 01
+		 *   |         |
+		 *   |         |
+		 *  10 ------- 11
+		 */
 		fx = i & 1;
 		fy = i >> 1;
 
@@ -156,63 +168,92 @@ tile_mask(cairo_t *cr, cairo_surface_t *surface,
 					    -y + fy * (128 - height));
 		cairo_pattern_set_matrix(pattern, &matrix);
 
-		if (fy)
-			vmargin = margin;
-		else
-			vmargin = top_margin;
+		shadow_width = margin;
+		shadow_height = fy ? margin : top_margin;
+
+		/* if the shadows together are greater than the surface, we need
+		 * to fix it - set the shadow size to the half of
+		 * the size of surface. Also handle the case when the size is
+		 * not divisible by 2. In that case we need one part of the
+		 * shadow to be one pixel greater. !fy or !fx, respectively,
+		 * will do the work.
+		 */
+		if (height < 2 * shadow_height)
+			shadow_height = (height + !fy) / 2;
+
+		if (width < 2 * shadow_width)
+			shadow_width = (width + !fx) / 2;
 
 		cairo_reset_clip(cr);
 		cairo_rectangle(cr,
-				x + fx * (width - margin),
-				y + fy * (height - vmargin),
-				margin, vmargin);
+				x + fx * (width - shadow_width),
+				y + fy * (height - shadow_height),
+				shadow_width, shadow_height);
 		cairo_clip (cr);
 		cairo_mask(cr, pattern);
 	}
 
-	/* Top stretch */
-	cairo_matrix_init_translate(&matrix, 60, 0);
-	cairo_matrix_scale(&matrix, 8.0 / width, 1);
-	cairo_matrix_translate(&matrix, -x - width / 2, -y);
-	cairo_pattern_set_matrix(pattern, &matrix);
-	cairo_rectangle(cr, x + margin, y, width - 2 * margin, margin);
 
-	cairo_reset_clip(cr);
-	cairo_rectangle(cr,
-			x + margin,
-			y,
-			width - 2 * margin, margin);
-	cairo_clip (cr);
-	cairo_mask(cr, pattern);
+	shadow_width = width - 2 * margin;
+	shadow_height = top_margin;
+	if (height < 2 * shadow_height)
+		shadow_height = height / 2;
 
-	/* Bottom stretch */
-	cairo_matrix_translate(&matrix, 0, -height + 128);
-	cairo_pattern_set_matrix(pattern, &matrix);
+	if (shadow_width > 0 && shadow_height) {
+		/* Top stretch */
+		cairo_matrix_init_translate(&matrix, 60, 0);
+		cairo_matrix_scale(&matrix, 8.0 / width, 1);
+		cairo_matrix_translate(&matrix, -x - width / 2, -y);
+		cairo_pattern_set_matrix(pattern, &matrix);
+		cairo_rectangle(cr, x + margin, y, shadow_width, shadow_height);
 
-	cairo_reset_clip(cr);
-	cairo_rectangle(cr, x + margin, y + height - margin,
-			width - 2 * margin, margin);
-	cairo_clip (cr);
-	cairo_mask(cr, pattern);
+		cairo_reset_clip(cr);
+		cairo_rectangle(cr,
+				x + margin, y,
+				shadow_width, shadow_height);
+		cairo_clip (cr);
+		cairo_mask(cr, pattern);
 
-	/* Left stretch */
-	cairo_matrix_init_translate(&matrix, 0, 60);
-	cairo_matrix_scale(&matrix, 1, 8.0 / height);
-	cairo_matrix_translate(&matrix, -x, -y - height / 2);
-	cairo_pattern_set_matrix(pattern, &matrix);
-	cairo_reset_clip(cr);
-	cairo_rectangle(cr, x, y + margin, margin, height - 2 * margin);
-	cairo_clip (cr);
-	cairo_mask(cr, pattern);
+		/* Bottom stretch */
+		cairo_matrix_translate(&matrix, 0, -height + 128);
+		cairo_pattern_set_matrix(pattern, &matrix);
 
-	/* Right stretch */
-	cairo_matrix_translate(&matrix, -width + 128, 0);
-	cairo_pattern_set_matrix(pattern, &matrix);
-	cairo_rectangle(cr, x + width - margin, y + margin,
-			margin, height - 2 * margin);
-	cairo_reset_clip(cr);
-	cairo_clip (cr);
-	cairo_mask(cr, pattern);
+		cairo_reset_clip(cr);
+		cairo_rectangle(cr, x + margin, y + height - margin,
+				shadow_width, margin);
+		cairo_clip (cr);
+		cairo_mask(cr, pattern);
+	}
+
+	shadow_width = margin;
+	if (width < 2 * shadow_width)
+		shadow_width = width / 2;
+
+	shadow_height = height - margin - top_margin;
+
+	/* if height is smaller than sum of margins,
+	 * then the shadow is already done by the corners */
+	if (shadow_height > 0 && shadow_width) {
+		/* Left stretch */
+		cairo_matrix_init_translate(&matrix, 0, 60);
+		cairo_matrix_scale(&matrix, 1, 8.0 / height);
+		cairo_matrix_translate(&matrix, -x, -y - height / 2);
+		cairo_pattern_set_matrix(pattern, &matrix);
+		cairo_reset_clip(cr);
+		cairo_rectangle(cr, x, y + top_margin,
+				shadow_width, shadow_height);
+		cairo_clip (cr);
+		cairo_mask(cr, pattern);
+
+		/* Right stretch */
+		cairo_matrix_translate(&matrix, -width + 128, 0);
+		cairo_pattern_set_matrix(pattern, &matrix);
+		cairo_rectangle(cr, x + width - shadow_width, y + top_margin,
+				shadow_width, shadow_height);
+		cairo_reset_clip(cr);
+		cairo_clip (cr);
+		cairo_mask(cr, pattern);
+	}
 
 	cairo_pattern_destroy(pattern);
 	cairo_reset_clip(cr);
@@ -320,12 +361,27 @@ load_cairo_surface(const char *filename)
 						   width, height, stride);
 }
 
+void
+theme_set_background_source(struct theme *t, cairo_t *cr, uint32_t flags)
+{
+	cairo_pattern_t *pattern;
+
+	if (flags & THEME_FRAME_ACTIVE) {
+		pattern = cairo_pattern_create_linear(16, 16, 16, 112);
+		cairo_pattern_add_color_stop_rgb(pattern, 0.0, 1.0, 1.0, 1.0);
+		cairo_pattern_add_color_stop_rgb(pattern, 0.2, 0.8, 0.8, 0.8);
+		cairo_set_source(cr, pattern);
+		cairo_pattern_destroy(pattern);
+	} else {
+		cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, 1);
+	}
+}
+
 struct theme *
 theme_create(void)
 {
 	struct theme *t;
 	cairo_t *cr;
-	cairo_pattern_t *pattern;
 
 	t = malloc(sizeof *t);
 	if (t == NULL)
@@ -352,12 +408,7 @@ theme_create(void)
 	cr = cairo_create(t->active_frame);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-	pattern = cairo_pattern_create_linear(16, 16, 16, 112);
-	cairo_pattern_add_color_stop_rgb(pattern, 0.0, 1.0, 1.0, 1.0);
-	cairo_pattern_add_color_stop_rgb(pattern, 0.2, 0.8, 0.8, 0.8);
-	cairo_set_source(cr, pattern);
-	cairo_pattern_destroy(pattern);
-
+	theme_set_background_source(t, cr, THEME_FRAME_ACTIVE);
 	rounded_rect(cr, 0, 0, 128, 128, t->frame_radius);
 	cairo_fill(cr);
 
@@ -370,7 +421,7 @@ theme_create(void)
 		cairo_image_surface_create (CAIRO_FORMAT_ARGB32, 128, 128);
 	cr = cairo_create(t->inactive_frame);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_set_source_rgba(cr, 0.75, 0.75, 0.75, 1);
+	theme_set_background_source(t, cr, 0);
 	rounded_rect(cr, 0, 0, 128, 128, t->frame_radius);
 	cairo_fill(cr);
 
@@ -403,12 +454,13 @@ theme_destroy(struct theme *t)
 void
 theme_render_frame(struct theme *t,
 		   cairo_t *cr, int width, int height,
-		   const char *title, uint32_t flags)
+		   const char *title, struct wl_list *buttons,
+		   uint32_t flags)
 {
 	cairo_text_extents_t extents;
 	cairo_font_extents_t font_extents;
 	cairo_surface_t *source;
-	int x, y, margin;
+	int x, y, margin, top_margin;
 
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_set_source_rgba(cr, 0, 0, 0, 0);
@@ -417,10 +469,9 @@ theme_render_frame(struct theme *t,
 	if (flags & THEME_FRAME_MAXIMIZED)
 		margin = 0;
 	else {
-		cairo_set_source_rgba(cr, 0, 0, 0, 0.45);
-		tile_mask(cr, t->shadow,
-			  2, 2, width + 8, height + 8,
-			  64, 64);
+		render_shadow(cr, t->shadow,
+			      2, 2, width + 8, height + 8,
+			      64, 64);
 		margin = t->margin;
 	}
 
@@ -429,40 +480,47 @@ theme_render_frame(struct theme *t,
 	else
 		source = t->inactive_frame;
 
+	if (title || !wl_list_empty(buttons))
+		top_margin = t->titlebar_height;
+	else
+		top_margin = t->width;
+
 	tile_source(cr, source,
 		    margin, margin,
 		    width - margin * 2, height - margin * 2,
-		    t->width, t->titlebar_height);
+		    t->width, top_margin);
 
-	cairo_rectangle (cr, margin + t->width, margin,
-			 width - (margin + t->width) * 2,
-			 t->titlebar_height - t->width);
-	cairo_clip(cr);
+	if (title || !wl_list_empty(buttons)) {
+		cairo_rectangle (cr, margin + t->width, margin,
+				 width - (margin + t->width) * 2,
+				 t->titlebar_height - t->width);
+		cairo_clip(cr);
 
-	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-	cairo_select_font_face(cr, "sans",
-			       CAIRO_FONT_SLANT_NORMAL,
-			       CAIRO_FONT_WEIGHT_BOLD);
-	cairo_set_font_size(cr, 14);
-	cairo_text_extents(cr, title, &extents);
-	cairo_font_extents (cr, &font_extents);
-	x = (width - extents.width) / 2;
-	y = margin +
-		(t->titlebar_height -
-		 font_extents.ascent - font_extents.descent) / 2 +
-		font_extents.ascent;
+		cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+		cairo_select_font_face(cr, "sans",
+				       CAIRO_FONT_SLANT_NORMAL,
+				       CAIRO_FONT_WEIGHT_BOLD);
+		cairo_set_font_size(cr, 14);
+		cairo_text_extents(cr, title, &extents);
+		cairo_font_extents (cr, &font_extents);
+		x = (width - extents.width) / 2;
+		y = margin +
+			(t->titlebar_height -
+			 font_extents.ascent - font_extents.descent) / 2 +
+			font_extents.ascent;
 
-	if (flags & THEME_FRAME_ACTIVE) {
-		cairo_move_to(cr, x + 1, y  + 1);
-		cairo_set_source_rgb(cr, 1, 1, 1);
-		cairo_show_text(cr, title);
-		cairo_move_to(cr, x, y);
-		cairo_set_source_rgb(cr, 0, 0, 0);
-		cairo_show_text(cr, title);
-	} else {
-		cairo_move_to(cr, x, y);
-		cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
-		cairo_show_text(cr, title);
+		if (flags & THEME_FRAME_ACTIVE) {
+			cairo_move_to(cr, x + 1, y  + 1);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			cairo_show_text(cr, title);
+			cairo_move_to(cr, x, y);
+			cairo_set_source_rgb(cr, 0, 0, 0);
+			cairo_show_text(cr, title);
+		} else {
+			cairo_move_to(cr, x, y);
+			cairo_set_source_rgb(cr, 0.4, 0.4, 0.4);
+			cairo_show_text(cr, title);
+		}
 	}
 }
 
@@ -471,14 +529,24 @@ theme_get_location(struct theme *t, int x, int y,
 				int width, int height, int flags)
 {
 	int vlocation, hlocation, location;
-	const int grip_size = 8;
-	int margin;
+	int margin, top_margin, grip_size;
 
-	margin = (flags & THEME_FRAME_MAXIMIZED) ? 0 : t->margin;
+	if (flags & THEME_FRAME_MAXIMIZED) {
+		margin = 0;
+		grip_size = 0;
+	} else {
+		margin = t->margin;
+		grip_size = 8;
+	}
+
+	if (flags & THEME_FRAME_NO_TITLE)
+		top_margin = t->width;
+	else
+		top_margin = t->titlebar_height;
 
 	if (x < margin)
 		hlocation = THEME_LOCATION_EXTERIOR;
-	else if (margin <= x && x < margin + grip_size)
+	else if (x < margin + grip_size)
 		hlocation = THEME_LOCATION_RESIZING_LEFT;
 	else if (x < width - margin - grip_size)
 		hlocation = THEME_LOCATION_INTERIOR;
@@ -489,7 +557,7 @@ theme_get_location(struct theme *t, int x, int y,
 
 	if (y < margin)
 		vlocation = THEME_LOCATION_EXTERIOR;
-	else if (margin <= y && y < margin + grip_size)
+	else if (y < margin + grip_size)
 		vlocation = THEME_LOCATION_RESIZING_TOP;
 	else if (y < height - margin - grip_size)
 		vlocation = THEME_LOCATION_INTERIOR;
@@ -502,7 +570,7 @@ theme_get_location(struct theme *t, int x, int y,
 	if (location & THEME_LOCATION_EXTERIOR)
 		location = THEME_LOCATION_EXTERIOR;
 	if (location == THEME_LOCATION_INTERIOR &&
-	    y < margin + t->titlebar_height)
+	    y < margin + top_margin)
 		location = THEME_LOCATION_TITLEBAR;
 	else if (location == THEME_LOCATION_INTERIOR)
 		location = THEME_LOCATION_CLIENT_AREA;

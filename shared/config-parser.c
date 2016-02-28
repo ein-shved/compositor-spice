@@ -1,23 +1,26 @@
 /*
  * Copyright © 2011 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "config.h"
@@ -36,10 +39,7 @@
 
 #include <wayland-util.h>
 #include "config-parser.h"
-
-#define container_of(ptr, type, member) ({				\
-	const __typeof__( ((type *)0)->member ) *__mptr = (ptr);	\
-	(type *)( (char *)__mptr - offsetof(type,member) );})
+#include "helpers.h"
 
 struct weston_config_entry {
 	char *key;
@@ -282,13 +282,45 @@ weston_config_section_get_bool(struct weston_config_section *section,
 	return 0;
 }
 
+WL_EXPORT
+const char *
+weston_config_get_libexec_dir(void)
+{
+	const char *path = getenv("WESTON_BUILD_DIR");
+
+	if (path)
+		return path;
+
+	return LIBEXECDIR;
+}
+
+const char *
+weston_config_get_name_from_env(void)
+{
+	const char *name;
+
+	name = getenv(WESTON_CONFIG_FILE_ENV_VAR);
+	if (name)
+		return name;
+
+	return "weston.ini";
+}
+
 static struct weston_config_section *
 config_add_section(struct weston_config *config, const char *name)
 {
 	struct weston_config_section *section;
 
 	section = malloc(sizeof *section);
+	if (section == NULL)
+		return NULL;
+
 	section->name = strdup(name);
+	if (section->name == NULL) {
+		free(section);
+		return NULL;
+	}
+
 	wl_list_init(&section->entry_list);
 	wl_list_insert(config->section_list.prev, &section->link);
 
@@ -302,8 +334,22 @@ section_add_entry(struct weston_config_section *section,
 	struct weston_config_entry *entry;
 
 	entry = malloc(sizeof *entry);
+	if (entry == NULL)
+		return NULL;
+
 	entry->key = strdup(key);
+	if (entry->key == NULL) {
+		free(entry);
+		return NULL;
+	}
+
 	entry->value = strdup(value);
+	if (entry->value == NULL) {
+		free(entry->key);
+		free(entry);
+		return NULL;
+	}
+
 	wl_list_insert(section->entry_list.prev, &entry->link);
 
 	return entry;
@@ -314,6 +360,7 @@ weston_config_parse(const char *name)
 {
 	FILE *fp;
 	char line[512], *p;
+	struct stat filestat;
 	struct weston_config *config;
 	struct weston_config_section *section = NULL;
 	int i, fd;
@@ -326,6 +373,13 @@ weston_config_parse(const char *name)
 
 	fd = open_config_file(config, name);
 	if (fd == -1) {
+		free(config);
+		return NULL;
+	}
+
+	if (fstat(fd, &filestat) < 0 ||
+	    !S_ISREG(filestat.st_mode)) {
+		close(fd);
 		free(config);
 		return NULL;
 	}

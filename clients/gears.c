@@ -1,28 +1,30 @@
 /*
  * Copyright © 2008 Kristian Høgsberg
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include "config.h"
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,7 +77,7 @@ struct gear_template {
 static const struct gear_template gear_templates[] = {
 	{ { 0.8, 0.1, 0.0, 1.0 }, 1.0, 4.0, 1.0, 20, 0.7 },
 	{ { 0.0, 0.8, 0.2, 1.0 }, 0.5, 2.0, 2.0, 10, 0.7 },
-	{ { 0.2, 0.2, 1.0, 1.0 }, 1.3, 2.0, 0.5, 10, 0.7 }, 
+	{ { 0.2, 0.2, 1.0, 1.0 }, 1.3, 2.0, 0.5, 10, 0.7 },
 };
 
 static GLfloat light_pos[4] = {5.0, 5.0, 10.0, 0.0};
@@ -208,8 +210,13 @@ static void
 update_fps(struct gears *gears, uint32_t time)
 {
 	long diff_ms;
+	static bool first_call = true;
 
-	gears->frames++;
+	if (first_call) {
+		gears->last_fps = time;
+		first_call = false;
+	} else
+		gears->frames++;
 
 	diff_ms = time - gears->last_fps;
 
@@ -307,7 +314,7 @@ redraw_handler(struct widget *widget, void *data)
 		die("Unable to acquire window surface, "
 		    "compiled without cairo-egl?\n");
 	}
-	
+
 	glViewport(allocation.x,
 		   window_allocation.height - allocation.height - allocation.y,
 		   allocation.width, allocation.height);
@@ -398,13 +405,12 @@ gears_create(struct display *display)
 {
 	const int width = 450, height = 500;
 	struct gears *gears;
-	struct timeval tv;
 	int i;
 
 	gears = zalloc(sizeof *gears);
 	gears->d = display;
 	gears->window = window_create(display);
-	gears->widget = frame_create(gears->window, gears);
+	gears->widget = window_frame_create(gears->window, gears);
 	window_set_title(gears->window, "Wayland Gears");
 
 	gears->display = display_get_egl_display(gears->d);
@@ -437,8 +443,6 @@ gears_create(struct display *display)
 	gears->view.rotx = 20.0;
 	gears->view.roty = 30.0;
 
-	gettimeofday(&tv, NULL);
-	gears->last_fps = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 	printf("Warning: FPS count is limited by the wayland compositor or monitor refresh rate\n");
 
 	glEnable(GL_NORMALIZE);
@@ -469,17 +473,29 @@ gears_create(struct display *display)
 	return gears;
 }
 
+static void
+gears_destroy(struct gears *gears)
+{
+	widget_destroy(gears->widget);
+	window_destroy(gears->window);
+	free(gears);
+}
+
 int main(int argc, char *argv[])
 {
 	struct display *d;
+	struct gears *gears;
 
 	d = display_create(&argc, argv);
 	if (d == NULL) {
 		fprintf(stderr, "failed to create display: %m\n");
 		return -1;
 	}
-	gears_create(d);
+	gears = gears_create(d);
 	display_run(d);
+
+	gears_destroy(gears);
+	display_destroy(d);
 
 	return 0;
 }

@@ -1,6 +1,6 @@
-m4_define([weston_major_version], [1])
-m4_define([weston_minor_version], [2])
-m4_define([weston_micro_version], [91])
+m4_define([weston_major_version],  [1])
+m4_define([weston_minor_version], [10])
+m4_define([weston_micro_version], [90])
 m4_define([weston_version],
           [weston_major_version.weston_minor_version.weston_micro_version])
 
@@ -9,19 +9,21 @@ AC_INIT([weston],
         [weston_version],
         [https://bugs.freedesktop.org/enter_bug.cgi?product=Wayland&component=weston&version=weston_version],
         [weston],
-        [http://wayland.freedesktop.org/])
+        [http://wayland.freedesktop.org])
 
 AC_SUBST([WESTON_VERSION_MAJOR], [weston_major_version])
 AC_SUBST([WESTON_VERSION_MINOR], [weston_minor_version])
 AC_SUBST([WESTON_VERSION_MICRO], [weston_micro_version])
 AC_SUBST([WESTON_VERSION], [weston_version])
 
+AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_HEADERS([config.h])
+AC_CONFIG_MACRO_DIR([m4])
 
 AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
 
-AM_INIT_AUTOMAKE([1.11 parallel-tests foreign no-dist-gzip dist-xz color-tests])
+AM_INIT_AUTOMAKE([1.11 parallel-tests foreign no-dist-gzip dist-xz color-tests subdir-objects])
 
 AM_SILENT_RULES([yes])
 
@@ -35,6 +37,8 @@ LT_INIT([disable-static])
 
 AC_ARG_VAR([WESTON_NATIVE_BACKEND],
            [Set the native backend to use, if Weston is not running under Wayland nor X11. @<:@default=drm-backend.so@:>@])
+AC_ARG_VAR([WESTON_SHELL_CLIENT],
+           [Set the default desktop shell client to load if none is specified in weston.ini. @<:@default=weston-desktop-shell@:>@])
 
 PKG_PROG_PKG_CONFIG()
 
@@ -53,16 +57,37 @@ AC_CHECK_DECL(CLOCK_MONOTONIC,[],
 	      [[#include <time.h>]])
 AC_CHECK_HEADERS([execinfo.h])
 
-AC_CHECK_FUNCS([mkostemp strchrnul initgroups])
+AC_CHECK_FUNCS([mkostemp strchrnul initgroups posix_fallocate])
 
-COMPOSITOR_MODULES="wayland-server >= 1.2.91 pixman-1"
+COMPOSITOR_MODULES="wayland-server >= 1.10.0 pixman-1 >= 0.25.2"
+
+AC_CONFIG_FILES([doc/doxygen/tools.doxygen doc/doxygen/tooldev.doxygen])
+
+AC_ARG_ENABLE(devdocs,
+	      AS_HELP_STRING([--disable-devdocs],
+			     [do not enable building of developer documentation]),,
+	      enable_devdocs=auto)
+if test "x$enable_devdocs" != "xno"; then
+	AC_CHECK_PROGS([DOXYGEN], [doxygen])
+	if test "x$DOXYGEN" = "x" -a "x$enable_devdocs" = "xyes"; then
+		AC_MSG_ERROR([Developer documentation explicitly requested, but Doxygen couldn't be found])
+	fi
+	if test "x$DOXYGEN" != "x"; then
+		enable_devdocs=yes
+	else
+		enable_devdocs=no
+	fi
+fi
+AM_CONDITIONAL(ENABLE_DEVDOCS, test "x$enable_devdocs" = "xyes")
 
 AC_ARG_ENABLE(egl, [  --disable-egl],,
               enable_egl=yes)
 AM_CONDITIONAL(ENABLE_EGL, test x$enable_egl = xyes)
 if test x$enable_egl = xyes; then
 	AC_DEFINE([ENABLE_EGL], [1], [Build Weston with EGL support])
-	COMPOSITOR_MODULES="$COMPOSITOR_MODULES egl >= 7.10 glesv2"
+	PKG_CHECK_MODULES(EGL, [egl glesv2])
+        PKG_CHECK_MODULES([EGL_TESTS], [egl glesv2 wayland-client wayland-egl])
+	PKG_CHECK_MODULES([GL_RENDERER], [libdrm])
 fi
 
 AC_ARG_ENABLE(xkbcommon,
@@ -75,10 +100,8 @@ AC_ARG_ENABLE(xkbcommon,
 	      enable_xkbcommon=yes)
 if test x$enable_xkbcommon = xyes; then
 	AC_DEFINE(ENABLE_XKBCOMMON, [1], [Build Weston with libxkbcommon support])
-	COMPOSITOR_MODULES="$COMPOSITOR_MODULES xkbcommon"
+	COMPOSITOR_MODULES="$COMPOSITOR_MODULES xkbcommon >= 0.3.0"
 fi
-
-PKG_CHECK_MODULES(COMPOSITOR, [$COMPOSITOR_MODULES])
 
 AC_ARG_ENABLE(setuid-install, [  --enable-setuid-install],,
 	      enable_setuid_install=yes)
@@ -92,18 +115,20 @@ AC_ARG_ENABLE(xwayland-test, [  --enable-xwayland-test],,
 AM_CONDITIONAL(ENABLE_XWAYLAND, test x$enable_xwayland = xyes)
 AM_CONDITIONAL(ENABLE_XWAYLAND_TEST, test x$enable_xwayland = xyes -a x$enable_xwayland_test = xyes)
 if test x$enable_xwayland = xyes; then
-  PKG_CHECK_MODULES([XWAYLAND], xcb xcb-xfixes xcursor cairo-xcb)
+  PKG_CHECK_MODULES([XWAYLAND], xcb xcb-xfixes xcb-composite xcursor cairo-xcb)
   AC_DEFINE([BUILD_XWAYLAND], [1], [Build the X server launcher])
 
   AC_ARG_WITH(xserver-path, AS_HELP_STRING([--with-xserver-path=PATH],
               [Path to X server]), [XSERVER_PATH="$withval"],
-              [XSERVER_PATH="$bindir/Xorg"])
+              [XSERVER_PATH="/usr/bin/Xwayland"])
   AC_SUBST([XSERVER_PATH])
   if test x$enable_xwayland_test = xyes; then
-    PKG_CHECK_MODULES([XWAYLAND_TEST], xcb xcb-dri2 libdrm)
+    PKG_CHECK_MODULES([XWAYLAND_TEST], x11)
   fi
 fi
 
+PKG_CHECK_MODULES(LIBDRM, [libdrm],
+                  [AC_DEFINE(HAVE_LIBDRM, 1, [Define if libdrm is available]) have_libdrm=yes], have_libdrm=no)
 
 AC_ARG_ENABLE(x11-compositor, [  --enable-x11-compositor],,
 	      enable_x11_compositor=yes)
@@ -143,12 +168,22 @@ fi
 
 AC_ARG_ENABLE(drm-compositor, [  --enable-drm-compositor],,
 	      enable_drm_compositor=yes)
-AM_CONDITIONAL(ENABLE_DRM_COMPOSITOR, test x$enable_drm_compositor = xyes -a x$enable_egl = xyes)
-if test x$enable_drm_compositor = xyes -a x$enable_egl = xyes; then
+AM_CONDITIONAL(ENABLE_DRM_COMPOSITOR, test x$enable_drm_compositor = xyes)
+if test x$enable_drm_compositor = xyes; then
   AC_DEFINE([BUILD_DRM_COMPOSITOR], [1], [Build the DRM compositor])
   PKG_CHECK_MODULES(DRM_COMPOSITOR, [libudev >= 136 libdrm >= 2.4.30 gbm mtdev >= 1.1.0])
+  PKG_CHECK_MODULES(DRM_COMPOSITOR_GBM, [gbm >= 10.2],
+		    [AC_DEFINE([HAVE_GBM_FD_IMPORT], 1, [gbm supports dmabuf import])],
+		    [AC_MSG_WARN([gbm does not support dmabuf import, will omit that capability])])
 fi
 
+
+PKG_CHECK_MODULES(LIBINPUT_BACKEND, [libinput >= 0.8.0])
+PKG_CHECK_MODULES(COMPOSITOR, [$COMPOSITOR_MODULES])
+
+PKG_CHECK_MODULES(WAYLAND_PROTOCOLS, [wayland-protocols >= 1.0],
+		  [ac_wayland_protocols_pkgdatadir=`$PKG_CONFIG --variable=pkgdatadir wayland-protocols`])
+AC_SUBST(WAYLAND_PROTOCOLS_DATADIR, $ac_wayland_protocols_pkgdatadir)
 
 AC_ARG_ENABLE(wayland-compositor, [  --enable-wayland-compositor],,
 	      enable_wayland_compositor=yes)
@@ -157,7 +192,7 @@ AM_CONDITIONAL(ENABLE_WAYLAND_COMPOSITOR,
 if test x$enable_wayland_compositor = xyes -a x$enable_egl = xyes; then
   AC_DEFINE([BUILD_WAYLAND_COMPOSITOR], [1],
 	    [Build the Wayland (nested) compositor])
-  PKG_CHECK_MODULES(WAYLAND_COMPOSITOR, [wayland-client wayland-egl])
+  PKG_CHECK_MODULES(WAYLAND_COMPOSITOR, [wayland-client >= 1.5.91 wayland-egl wayland-cursor])
 fi
 
 
@@ -165,6 +200,9 @@ AC_ARG_ENABLE(headless-compositor, [  --enable-headless-compositor],,
 	      enable_headless_compositor=yes)
 AM_CONDITIONAL(ENABLE_HEADLESS_COMPOSITOR,
 	       test x$enable_headless_compositor = xyes)
+if test x$enable_headless_compositor = xyes; then
+  AC_DEFINE([BUILD_HEADLESS_COMPOSITOR], [1], [Build the headless compositor])
+fi
 
 
 AC_ARG_ENABLE(rpi-compositor,
@@ -200,6 +238,32 @@ AM_CONDITIONAL([ENABLE_RDP_COMPOSITOR],
 if test x$enable_rdp_compositor = xyes; then
   AC_DEFINE([BUILD_RDP_COMPOSITOR], [1], [Build the RDP compositor])
   PKG_CHECK_MODULES(RDP_COMPOSITOR, [freerdp >= 1.1.0])
+
+  SAVED_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="$CPPFLAGS $RDP_COMPOSITOR_CFLAGS"
+  AC_CHECK_HEADERS([freerdp/version.h])
+  CPPFLAGS="$SAVED_CPPFLAGS"
+fi
+
+AC_ARG_ENABLE([spice-compositor], [  --enable-spice-compositor],,
+	          enable_spice_compositor=no)
+AM_CONDITIONAL(ENABLE_SPICE_COMPOSITOR, test x$enable_spice_compositor = xyes)
+if test x$enable_spice_compositor = xyes; then
+  AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
+  PKG_CHECK_MODULES(SPICE_SERVER, [spice-server])
+  PKG_CHECK_MODULES(SPICE_PROTOCOL, [spice-protocol])
+fi
+
+AC_ARG_ENABLE([screen-sharing], [  --enable-screen-sharing],,
+              enable_screen_sharing=no)
+AM_CONDITIONAL([ENABLE_SCREEN_SHARING],
+               [test x$enable_screen_sharing = xyes])
+if test x$enable_screen_sharing = xyes; then
+  PKG_CHECK_MODULES(SCREEN_SHARE, [wayland-client])
+
+  if test x$enable_rdp_compositor != xyes; then
+    AC_MSG_WARN([The screen-share.so module requires the RDP backend.])
+  fi
 fi
 
 AC_ARG_WITH(cairo,
@@ -212,9 +276,11 @@ if test "x$with_cairo" = "ximage"; then
 else
 if test "x$with_cairo" = "xgl"; then
 	cairo_modules="cairo-gl"
+	AC_MSG_WARN([The --with-cairo=gl option can cause increased resource usage and potential instability, and thus is not recommended.  It is needed only for a few special demo programs.])
 else
 if test "x$with_cairo" = "xglesv2"; then
 	cairo_modules="cairo-glesv2"
+	AC_MSG_WARN([The --with-cairo=gles2 option can cause increased resource usage and potential instability, and thus is not recommended.  It is needed only for a few special demo programs.])
 else
 	AC_ERROR([Unknown cairo renderer requested])
 fi
@@ -234,30 +300,6 @@ if test "x$cairo_modules" = "xcairo-glesv2"; then
 AC_DEFINE([USE_CAIRO_GLESV2], [1], [Use the GLESv2 GL cairo backend])
 fi
 
-AC_ARG_ENABLE(spice-compositor, [  --enable-spice-compositor],,
-	      enable_spice_compositor=yes)
-AM_CONDITIONAL(ENABLE_SPICE_COMPOSITOR, test x$enable_spice_compositor = xyes)
-if test x$enable_spice_compositor = xyes; then
-  PKG_CHECK_MODULES([SPICE], 
-    [   
-      spice-server
-      spice-protocol
-    ] ,
-    [
-      AC_SUBST(SPICE_CFLAGS)
-      AC_SUBST(SPICE_LIBS)
-    ],
-  )
-  spice_save_LIBS=$LIBS
-  spice_save_CFLAGS=$CFLAGS
-  CFLAGS=$SPICE_CFLAGS
-  LIBS=$SPICE_LIBS
-  LIBS=$spice_save_LIBS
-  CFLAGS=$spice_save_CFLAGS
-
-  AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
-fi
-
 AC_ARG_ENABLE(monitor-renderer, [  --enable-monitor-renderer],,
               enable_monitor_renderer=no)
 AM_CONDITIONAL(ENABLE_MONITOR_RENDERER, test x$enable_monitor_renderer = xyes)
@@ -268,9 +310,17 @@ fi
 
 PKG_CHECK_MODULES(PIXMAN, [pixman-1])
 PKG_CHECK_MODULES(PNG, [libpng])
-PKG_CHECK_MODULES(WEBP, [libwebp], [have_webp=yes], [have_webp=no])
+
+AC_ARG_WITH([webp],
+            AS_HELP_STRING([--without-webp],
+                           [Use libwebp for WebP decoding support [default=auto]]))
+AS_IF([test "x$with_webp" != "xno"],
+      [PKG_CHECK_MODULES(WEBP, [libwebp], [have_webp=yes], [have_webp=no])],
+      [have_webp=no])
 AS_IF([test "x$have_webp" = "xyes"],
-      [AC_DEFINE([HAVE_WEBP], [1], [Have webp])])
+      [AC_DEFINE([HAVE_WEBP], [1], [Have webp])],
+      [AS_IF([test "x$with_webp" = "xyes"],
+             [AC_MSG_ERROR([WebP support explicitly requested, but libwebp couldn't be found])])])
 
 AC_ARG_ENABLE(vaapi-recorder, [  --enable-vaapi-recorder],,
 	      enable_vaapi_recorder=auto)
@@ -296,6 +346,8 @@ AC_SUBST(JPEG_LIBS)
 
 PKG_CHECK_MODULES(CAIRO, [cairo])
 
+PKG_CHECK_MODULES(TEST_CLIENT, [wayland-client >= 1.10.0])
+
 AC_ARG_ENABLE(simple-clients,
               AS_HELP_STRING([--disable-simple-clients],
                              [do not build the simple wl_shm clients]),,
@@ -312,24 +364,49 @@ AC_ARG_ENABLE(simple-egl-clients,
 AM_CONDITIONAL(BUILD_SIMPLE_EGL_CLIENTS, test "x$enable_simple_egl_clients" = "xyes")
 if test x$enable_simple_egl_clients = xyes; then
   PKG_CHECK_MODULES(SIMPLE_EGL_CLIENT,
-                    [egl >= 7.10 glesv2 wayland-client wayland-egl wayland-cursor])
+                    [egl glesv2 wayland-client wayland-egl wayland-cursor])
 fi
+
+AC_ARG_ENABLE(simple-dmabuf-intel-client,
+              AS_HELP_STRING([--disable-simple-dmabuf-intel-client],
+                             [do not build the simple dmabuf intel client]),,
+              enable_simple_dmabuf_intel_client="auto")
+if ! test "x$enable_simple_dmabuf_intel_client" = "xno"; then
+  PKG_CHECK_MODULES(SIMPLE_DMABUF_INTEL_CLIENT, [wayland-client libdrm libdrm_intel],
+		    have_simple_dmabuf_intel_client=yes, have_simple_dmabuf_intel_client=no)
+  if test "x$have_simple_dmabuf_intel_client" = "xno" -a "x$enable_simple_dmabuf_intel_client" = "xyes"; then
+    AC_MSG_ERROR([Intel dmabuf client explicitly enabled, but libdrm_intel couldn't be found])
+  fi
+  enable_simple_dmabuf_intel_client="$have_simple_dmabuf_intel_client"
+fi
+AM_CONDITIONAL(BUILD_SIMPLE_DMABUF_INTEL_CLIENT, test "x$enable_simple_dmabuf_intel_client" = "xyes")
+
+AC_ARG_ENABLE(simple-dmabuf-v4l-client,
+              AS_HELP_STRING([--disable-simple-dmabuf-v4l-client],
+                             [do not build the simple dmabuf v4l client]),,
+              enable_simple_dmabuf_v4l_client="auto")
+if ! test "x$enable_simple_dmabuf_v4l_client" = "xno"; then
+  PKG_CHECK_MODULES(SIMPLE_DMABUF_V4L_CLIENT, [wayland-client libdrm],
+		    have_simple_dmabuf_v4l_client=yes, have_simple_dmabuf_v4l_client=no)
+  if test "x$have_simple_dmabuf_v4l_client" = "xno" -a "x$enable_simple_dmabuf_v4l_client" = "xyes"; then
+    AC_MSG_ERROR([V4L dmabuf client explicitly enabled, but libdrm couldn't be found])
+  fi
+  enable_simple_dmabuf_v4l_client="$have_simple_dmabuf_v4l_client"
+fi
+AM_CONDITIONAL(BUILD_SIMPLE_DMABUF_V4L_CLIENT, test "x$enable_simple_dmabuf_v4l_client" = "xyes")
 
 AC_ARG_ENABLE(clients, [  --enable-clients],, enable_clients=yes)
 AM_CONDITIONAL(BUILD_CLIENTS, test x$enable_clients = xyes)
 if test x$enable_clients = xyes; then
   AC_DEFINE([BUILD_CLIENTS], [1], [Build the Wayland clients])
 
-  PKG_CHECK_MODULES(CLIENT, [wayland-client cairo >= 1.10.0 xkbcommon wayland-cursor])
+  PKG_CHECK_MODULES(CLIENT, [wayland-client >= 1.5.91 cairo >= 1.10.0 xkbcommon wayland-cursor])
   PKG_CHECK_MODULES(SERVER, [wayland-server])
-  PKG_CHECK_MODULES(WESTON_INFO, [wayland-client])
-
-  PKG_CHECK_MODULES(POPPLER, [poppler-glib glib-2.0 gobject-2.0 gio-2.0 ],
-			     [have_poppler=yes], [have_poppler=no])
+  PKG_CHECK_MODULES(WESTON_INFO, [wayland-client >= 1.5.91])
 
   # Only check for cairo-egl if a GL or GLES renderer requested
   AS_IF([test "x$cairo_modules" = "xcairo-gl" -o "x$cairo_modules" = "xcairo-glesv2"], [
-    PKG_CHECK_MODULES(CAIRO_EGL, [wayland-egl egl >= 7.10 cairo-egl >= 1.11.3 $cairo_modules],
+    PKG_CHECK_MODULES(CAIRO_EGL, [wayland-egl egl cairo-egl >= 1.11.3 $cairo_modules],
                       [have_cairo_egl=yes], [have_cairo_egl=no])
     AS_IF([test "x$have_cairo_egl" = "xyes"],
 	  [AC_DEFINE([HAVE_CAIRO_EGL], [1], [Have cairo-egl])],
@@ -349,26 +426,13 @@ AS_IF([test "x$enable_resize_optimization" = "xyes"],
 AC_ARG_ENABLE(weston-launch, [  --enable-weston-launch],, enable_weston_launch=yes)
 AM_CONDITIONAL(BUILD_WESTON_LAUNCH, test x$enable_weston_launch == xyes)
 if test x$enable_weston_launch == xyes; then
-  PKG_CHECK_MODULES(WESTON_LAUNCH, [libdrm])
-  PKG_CHECK_MODULES(SYSTEMD_LOGIN, [libsystemd-login],
-		    [have_systemd_login=yes], [have_systemd_login=no])
-  AS_IF([test "x$have_systemd_login" = "xyes"],
-	[AC_DEFINE([HAVE_SYSTEMD_LOGIN], [1], [Have systemd-login])])
-
   AC_CHECK_LIB([pam], [pam_open_session], [have_pam=yes], [have_pam=no])
   if test x$have_pam == xno; then
     AC_ERROR([weston-launch requires pam])
   fi
-  WESTON_LAUNCH_LIBS="$WESTON_LAUNCH_LIBS -lpam"
+  PAM_LIBS=-lpam
+  AC_SUBST(PAM_LIBS)
 fi
-
-if test x$enable_egl = xyes; then
-  PKG_CHECK_MODULES(GLU, [glu], [have_glu=yes], [have_glu=no])
-fi
-AM_CONDITIONAL(HAVE_GLU, test "x$have_glu" = "xyes")
-
-
-AM_CONDITIONAL(HAVE_POPPLER, test "x$have_poppler" = "xyes")
 
 AM_CONDITIONAL(HAVE_PANGO, test "x$have_pango" = "xyes")
 
@@ -383,12 +447,12 @@ AM_CONDITIONAL(BUILD_SUBSURFACES_CLIENT,
 
 AM_CONDITIONAL(ENABLE_DESKTOP_SHELL, true)
 
-AC_ARG_ENABLE(tablet-shell,
-              AS_HELP_STRING([--disable-tablet-shell],
-                             [do not build tablet-shell server plugin and client]),,
-	      enable_tablet_shell=yes)
-AM_CONDITIONAL(ENABLE_TABLET_SHELL,
-	       test "x$enable_tablet_shell" = "xyes")
+AC_ARG_ENABLE(fullscreen-shell,
+              AS_HELP_STRING([--disable-fullscreen-shell],
+                             [do not build fullscreen-shell server plugin]),,
+	      enable_fullscreen_shell=yes)
+AM_CONDITIONAL(ENABLE_FULLSCREEN_SHELL,
+	       test "x$enable_fullscreen_shell" = "xyes")
 
 # CMS modules
 AC_ARG_ENABLE(colord,
@@ -409,6 +473,93 @@ if test "x$enable_colord" != "xno"; then
 fi
 AM_CONDITIONAL(ENABLE_COLORD, test "x$enable_colord" = "xyes")
 
+# dbus support
+AC_ARG_ENABLE(dbus,
+              AS_HELP_STRING([--disable-dbus],
+                             [do not build with dbus support]),,
+              enable_dbus=auto)
+if test "x$enable_dbus" != "xno"; then
+        PKG_CHECK_MODULES(DBUS,
+                          dbus-1 >= 1.6,
+                          have_dbus=yes,
+                          have_dbus=no)
+        if test "x$have_dbus" = "xno" -a "x$enable_dbus" = "xyes"; then
+                AC_MSG_ERROR([dbus support explicitly requested, but libdbus couldn't be found])
+        fi
+        if test "x$have_dbus" = "xyes"; then
+                enable_dbus=yes
+                AC_DEFINE([HAVE_DBUS], [1], [Build with dbus support])
+        else
+                enable_dbus=no
+        fi
+fi
+AM_CONDITIONAL(ENABLE_DBUS, test "x$enable_dbus" = "xyes")
+
+# systemd-login support
+AC_ARG_ENABLE(systemd-login,
+              AS_HELP_STRING([--enable-systemd-login],
+                             [Enable logind support]),,
+              enable_systemd_login=auto)
+if test x$enable_systemd_login != xno -a x$have_dbus != xno; then
+  PKG_CHECK_MODULES(SYSTEMD_LOGIN,
+                    [libsystemd >= 209],
+                    [have_systemd_login_209=yes;have_systemd_login=yes],
+                    [have_systemd_login_209=no;have_systemd_login=no])
+
+  # Older versions of systemd package systemd-login separately. Fall back on that
+  AS_IF([test x$have_systemd_login != xyes],[
+        PKG_CHECK_MODULES(SYSTEMD_LOGIN,
+                          [libsystemd-login >= 198],
+                          [have_systemd_login=yes],
+                          [have_systemd_login=no])
+        ])
+else
+  have_systemd_login=no
+fi
+
+if test "x$have_systemd_login" = "xno" -a "x$enable_systemd_login" = "xyes"; then
+  AC_MSG_ERROR([systemd-login support explicitly enabled, but can't find libsystemd>=209, libsystemd-login or dbus])
+fi
+
+AS_IF([test "x$have_systemd_login" = "xyes"],
+      [AC_DEFINE([HAVE_SYSTEMD_LOGIN], [1], [Have systemd-login])])
+AM_CONDITIONAL(HAVE_SYSTEMD_LOGIN, test "x$have_systemd_login" = "xyes")
+
+AS_IF([test "x$have_systemd_login_209" = "xyes"],
+      [AC_DEFINE([HAVE_SYSTEMD_LOGIN_209], [1], [Have systemd-login >= 209])])
+
+
+# Note that other features might want libxml2, or this feature might use
+# alternative xml libraries at some point. Therefore the feature and
+# pre-requisite concepts are split.
+AC_ARG_ENABLE(junit_xml,
+	      AS_HELP_STRING([--disable-junit-xml],
+			     [do not build with JUnit XML output]),,
+	      enable_junit_xml=auto)
+if test "x$enable_junit_xml" != "xno"; then
+	PKG_CHECK_MODULES(LIBXML2,
+			  [libxml-2.0 >= 2.6],
+			  have_libxml2=yes,
+			  have_libxml2=no)
+	if test "x$have_libxml2" = "xno" -a "x$enable_junit_xml" = "xyes"; then
+		AC_MSG_ERROR([JUnit XML support explicitly requested, but libxml2 couldn't be found])
+	fi
+	if test "x$have_libxml2" = "xyes"; then
+		enable_junit_xml=yes
+		AC_DEFINE(ENABLE_JUNIT_XML, [1], [Build Weston with JUnit output support])
+	else
+		enable_junit_xml=no
+	fi
+fi
+AM_CONDITIONAL(ENABLE_JUNIT_XML, test "x$enable_junit_xml" = "xyes")
+
+# ivi-shell support
+AC_ARG_ENABLE(ivi-shell,
+              AS_HELP_STRING([--disable-ivi-shell],
+                             [do not build ivi-shell server plugin and client]),,
+	      enable_ivi_shell=yes)
+AM_CONDITIONAL(ENABLE_IVI_SHELL, test "x$enable_ivi_shell" = "xyes")
+
 AC_ARG_ENABLE(wcap-tools, [  --disable-wcap-tools],, enable_wcap_tools=yes)
 AM_CONDITIONAL(BUILD_WCAP_TOOLS, test x$enable_wcap_tools = xyes)
 if test x$enable_wcap_tools = xyes; then
@@ -417,16 +568,13 @@ if test x$enable_wcap_tools = xyes; then
   WCAP_LIBS="$WCAP_LIBS -lm"
 fi
 
-AC_CHECK_PROG(RSVG_CONVERT, rsvg-convert, rsvg-convert)
-AM_CONDITIONAL(HAVE_RSVG_CONVERT, test -n "$RSVG_CONVERT")
-
 PKG_CHECK_MODULES(SETBACKLIGHT, [libudev libdrm], enable_setbacklight=yes, enable_setbacklight=no)
 AM_CONDITIONAL(BUILD_SETBACKLIGHT, test "x$enable_setbacklight" = "xyes")
 
 if test "x$GCC" = "xyes"; then
 	GCC_CFLAGS="-Wall -Wextra -Wno-unused-parameter \
 		-Wno-missing-field-initializers -g -fvisibility=hidden \
-		-Wstrict-prototypes -Wmissing-prototypes"
+		-Wstrict-prototypes -Wmissing-prototypes -Wsign-compare"
 fi
 AC_SUBST(GCC_CFLAGS)
 
@@ -457,37 +605,60 @@ AC_MSG_NOTICE([Weston's native backend: $WESTON_NATIVE_BACKEND])
 AC_DEFINE_UNQUOTED([WESTON_NATIVE_BACKEND], ["$WESTON_NATIVE_BACKEND"],
 		   [The default backend to load, if not wayland nor x11.])
 
-AC_ARG_ENABLE(demo-clients,
-              AS_HELP_STRING([--enable-demo-clients],
-                             [install demo clients built with weston]),,
-              enable_demo_clients=no)
-AM_CONDITIONAL(ENABLE_DEMO_CLIENTS, [test "x$enable_demo_clients" = "xyes"])
-
-PKG_CHECK_MODULES(LCMS, lcms2,
-                  [have_lcms=yes], [have_lcms=no])
-if test "x$have_lcms" = xyes; then
-       AC_DEFINE(HAVE_LCMS, 1, [Have lcms support])
+if test "x$WESTON_SHELL_CLIENT" = "x"; then
+	WESTON_SHELL_CLIENT="weston-desktop-shell"
 fi
-AM_CONDITIONAL(HAVE_LCMS, [test "x$have_lcms" = xyes])
+AC_MSG_NOTICE([Weston's default desktop shell client: $WESTON_SHELL_CLIENT])
+AC_DEFINE_UNQUOTED([WESTON_SHELL_CLIENT], ["$WESTON_SHELL_CLIENT"],
+		   [The default desktop shell client to load.])
+
+AC_ARG_ENABLE(demo-clients-install,
+              AS_HELP_STRING([--enable-demo-clients-install],
+                             [Install demo clients built with weston]),,
+			     enable_demo_clients_install=no)
+AM_CONDITIONAL(INSTALL_DEMO_CLIENTS, [test "x$enable_demo_clients_install" = "xyes"])
+
+AC_ARG_ENABLE(lcms,
+              AS_HELP_STRING([--disable-lcms],
+                             [Disable lcms support]),,
+              enable_lcms=auto)
+if test "x$enable_lcms" != "xno"; then
+        PKG_CHECK_MODULES(LCMS,
+                          lcms2,
+                          have_lcms=yes,
+                          have_lcms=no)
+        if test "x$have_lcms" = "xno" -a "x$enable_lcms" = "xyes"; then
+          AC_MSG_ERROR([lcms support explicitly requested, but lcms couldn't be found])
+        fi
+        if test "x$have_lcms" = "xyes"; then
+                enable_lcms=yes
+                AC_DEFINE(HAVE_LCMS, 1, [Have lcms support])
+        fi
+fi
+AM_CONDITIONAL(HAVE_LCMS, [test "x$enable_lcms" = xyes])
 
 AC_PATH_PROG([wayland_scanner], [wayland-scanner])
 if test x$wayland_scanner = x; then
-	AC_MSG_ERROR([wayland-scanner is needed to compile weston])
+	PKG_CHECK_MODULES(WAYLAND_SCANNER, [wayland-scanner])
+	wayland_scanner=`$PKG_CONFIG --variable=wayland_scanner wayland-scanner`
 fi
 
-AC_CONFIG_FILES([Makefile
-		 shared/Makefile
-		 src/Makefile
-		 src/xwayland/Makefile
-		 src/version.h
-		 src/weston.pc
-		 clients/Makefile
-		 wcap/Makefile
-		 data/Makefile
-		 protocol/Makefile
-		 man/Makefile
-		 tests/Makefile
-         src/spice/Makefile])
+AC_ARG_ENABLE(systemd_notify,
+              AS_HELP_STRING([--enable-systemd-notify],
+                             [Enables systemd notifications to
+                              notify systemd about weston state
+                              and update watchdog.]),,
+              enable_systemd_notify=no)
+AM_CONDITIONAL(SYSTEMD_NOTIFY_SUPPORT, test x$enable_systemd_notify = xyes)
+if test "x$enable_systemd_notify" = "xyes"; then
+  AC_DEFINE([SYSTEMD_NOTIFY_SUPPORT], [1], [Build the systemd sd_notify support])
+  PKG_CHECK_MODULES(SYSTEMD_DAEMON, [libsystemd])
+fi
+
+AC_CONFIG_FILES([Makefile src/version.h src/weston.pc])
+
+AM_CONDITIONAL([HAVE_GIT_REPO], [test -f $srcdir/.git/logs/HEAD])
+
 AC_OUTPUT
 
 AC_MSG_RESULT([
@@ -497,13 +668,19 @@ AC_MSG_RESULT([
 	Cairo Renderer			${with_cairo}
 	EGL				${enable_egl}
 	libxkbcommon			${enable_xkbcommon}
+	xcb_xkb				${have_xcb_xkb}
 	XWayland			${enable_xwayland}
+	dbus				${enable_dbus}
+
+	ivi-shell			${enable_ivi_shell}
 
 	Build wcap utility		${enable_wcap_tools}
-	Build Tablet Shell		${enable_tablet_shell}
+	Build Fullscreen Shell		${enable_fullscreen_shell}
+	Enable developer documentation	${enable_devdocs}
 
 	weston-launch utility		${enable_weston_launch}
-	weston-launch systemd support	${have_systemd_login}
+	systemd-login support		${have_systemd_login}
+	systemd notify support		${enable_systemd_notify}
 
 	DRM Compositor			${enable_drm_compositor}
 	X11 Compositor			${enable_x11_compositor}
@@ -512,8 +689,9 @@ AC_MSG_RESULT([
 	RPI Compositor			${enable_rpi_compositor}
 	FBDEV Compositor		${enable_fbdev_compositor}
 	RDP Compositor			${enable_rdp_compositor}
-	Spice remote compositor		${enable_spice_compositor}
-	Monitor renderer wrapper	${enable_monitor_renderer}
+	Spice Compositor		${enable_spice_compositor}
+	Screen Sharing			${enable_screen_sharing}
+	JUnit XML output		${enable_junit_xml}
 
 	Raspberry Pi BCM headers	${have_bcm_host}
 
@@ -522,10 +700,9 @@ AC_MSG_RESULT([
 	Build Simple Clients		${enable_simple_clients}
 	Build Simple EGL Clients	${enable_simple_egl_clients}
 
-	Install Demo Clients		${enable_demo_clients}
+	Install Demo Clients		${enable_demo_clients_install}
 
 	Colord Support			${have_colord}
-	GLU Support			${have_glu}
 	LCMS2 Support			${have_lcms}
 	libwebp Support			${have_webp}
 	libunwind Support		${have_libunwind}

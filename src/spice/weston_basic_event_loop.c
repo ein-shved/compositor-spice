@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013 Yury Shvedov <shved@lvk.cs.msu.su>
+ * Copyright © 2013-2016 Yury Shvedov <shved@lvk.cs.msu.su>
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -19,6 +19,8 @@
  * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -54,11 +56,11 @@ exec_timer (void *data) {
     return 1;
 }
 
-static SpiceTimer* 
+static SpiceTimer*
 timer_add(SpiceTimerFunc func, void *opaque)
 {
     SpiceTimer *timer;
-    
+
     dprint (3, "called");
 
     assert (loop != NULL);
@@ -71,7 +73,7 @@ timer_add(SpiceTimerFunc func, void *opaque)
 
     timer->func = func;
     timer->opaque = opaque;
-    timer->event_source = wl_event_loop_add_timer (loop, 
+    timer->event_source = wl_event_loop_add_timer (loop,
         exec_timer, timer );
     if (timer->event_source == NULL) {
         goto err_add;
@@ -83,19 +85,19 @@ err_add:
 err_timer_malloc:
     return NULL;
 }
-static void 
+static void
 timer_start (SpiceTimer *timer, uint32_t ms)
 {
     wl_event_source_timer_update (
             timer->event_source, ms);
 }
-static void 
-timer_cancel (SpiceTimer *timer) 
+static void
+timer_cancel (SpiceTimer *timer)
 {
     wl_event_source_timer_update (
             timer->event_source, 0);
 }
-static void 
+static void
 timer_remove (SpiceTimer *timer)
 {
     timer_cancel (timer);
@@ -104,7 +106,7 @@ timer_remove (SpiceTimer *timer)
 }
 
 static int
-exec_watch (int fd, uint32_t mask, void *data) 
+exec_watch (int fd, uint32_t mask, void *data)
 {
     SpiceWatch *watch = data;
 
@@ -123,38 +125,33 @@ watch_add (int fd, int event_mask, SpiceWatchFunc func, void *opaque)
     }
 
     watch->event_source =  wl_event_loop_add_fd (
-        loop, fd, event_mask, exec_watch, watch ); 
+        loop, fd, event_mask, exec_watch, watch );
     watch->func = func;
     watch->opaque = opaque;
 
     return watch;
-
-err_add:
-    free (watch);
-err_watch_malloc:
-    return NULL;
 }
-void 
+void
 watch_update_mask (SpiceWatch *watch, int event_mask)
 {
     wl_event_source_fd_update (watch->event_source, event_mask);
 }
-void 
+void
 watch_remove (SpiceWatch *watch)
 {
     wl_event_source_remove (watch->event_source);
     free (watch);
 }
 
-void 
+void
 channel_event (int event, SpiceChannelEventInfo *info)
 {
 }
 
 SpiceCoreInterface *
-basic_event_loop_init(struct wl_display *display)
+basic_event_loop_init(struct weston_compositor *compositor)
 {
-    loop = wl_display_get_event_loop (display); 
+    loop = wl_display_get_event_loop (compositor->wl_display);
     memset(&core, 0, sizeof(core));
     core.base.major_version = SPICE_INTERFACE_CORE_MAJOR;
     core.base.minor_version = SPICE_INTERFACE_CORE_MINOR; // anything less then 3 and channel_event isn't called

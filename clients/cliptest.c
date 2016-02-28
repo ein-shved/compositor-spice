@@ -2,33 +2,35 @@
  * Copyright © 2012 Collabora, Ltd.
  * Copyright © 2012 Rob Clark
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
-/* cliptest: for debugging calculate_edges() function, which is copied
- * from compositor.c.
+/* cliptest: for debugging calculate_edges() function.
  * controls:
  *	clip box position: mouse left drag, keys: w a s d
  *	clip box size: mouse right drag, keys: i j k l
  *	surface orientation: mouse wheel, keys: n m
  *	surface transform disable key: r
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -47,6 +49,7 @@
 #include <linux/input.h>
 #include <wayland-client.h>
 
+#include "src/vertex-clipping.h"
 #include "window.h"
 
 typedef float GLfloat;
@@ -60,7 +63,7 @@ struct geometry {
 	float phi;
 };
 
-struct weston_surface {
+struct weston_view {
 	struct {
 		int enabled;
 	} transform;
@@ -69,10 +72,10 @@ struct weston_surface {
 };
 
 static void
-weston_surface_to_global_float(struct weston_surface *surface,
-			       GLfloat sx, GLfloat sy, GLfloat *x, GLfloat *y)
+weston_view_to_global_float(struct weston_view *view,
+			    float sx, float sy, float *x, float *y)
 {
-	struct geometry *g = surface->geometry;
+	struct geometry *g = view->geometry;
 
 	/* pure rotation around origin by sine and cosine */
 	*x = g->c * sx + g->s * sy;
@@ -80,271 +83,10 @@ weston_surface_to_global_float(struct weston_surface *surface,
 }
 
 /* ---------------------- copied begins -----------------------*/
-
-struct polygon8 {
-	GLfloat x[8];
-	GLfloat y[8];
-	int n;
-};
-
-struct clip_context {
-	struct {
-		GLfloat x;
-		GLfloat y;
-	} prev;
-
-	struct {
-		GLfloat x1, y1;
-		GLfloat x2, y2;
-	} clip;
-
-	struct {
-		GLfloat *x;
-		GLfloat *y;
-	} vertices;
-};
-
-static GLfloat
-float_difference(GLfloat a, GLfloat b)
-{
-	/* http://www.altdevblogaday.com/2012/02/22/comparing-floating-point-numbers-2012-edition/ */
-	static const GLfloat max_diff = 4.0f * FLT_MIN;
-	static const GLfloat max_rel_diff = 4.0e-5;
-	GLfloat diff = a - b;
-	GLfloat adiff = fabsf(diff);
-
-	if (adiff <= max_diff)
-		return 0.0f;
-
-	a = fabsf(a);
-	b = fabsf(b);
-	if (adiff <= (a > b ? a : b) * max_rel_diff)
-		return 0.0f;
-
-	return diff;
-}
-
-/* A line segment (p1x, p1y)-(p2x, p2y) intersects the line x = x_arg.
- * Compute the y coordinate of the intersection.
- */
-static GLfloat
-clip_intersect_y(GLfloat p1x, GLfloat p1y, GLfloat p2x, GLfloat p2y,
-		 GLfloat x_arg)
-{
-	GLfloat a;
-	GLfloat diff = float_difference(p1x, p2x);
-
-	/* Practically vertical line segment, yet the end points have already
-	 * been determined to be on different sides of the line. Therefore
-	 * the line segment is part of the line and intersects everywhere.
-	 * Return the end point, so we use the whole line segment.
-	 */
-	if (diff == 0.0f)
-		return p2y;
-
-	a = (x_arg - p2x) / diff;
-	return p2y + (p1y - p2y) * a;
-}
-
-/* A line segment (p1x, p1y)-(p2x, p2y) intersects the line y = y_arg.
- * Compute the x coordinate of the intersection.
- */
-static GLfloat
-clip_intersect_x(GLfloat p1x, GLfloat p1y, GLfloat p2x, GLfloat p2y,
-		 GLfloat y_arg)
-{
-	GLfloat a;
-	GLfloat diff = float_difference(p1y, p2y);
-
-	/* Practically horizontal line segment, yet the end points have already
-	 * been determined to be on different sides of the line. Therefore
-	 * the line segment is part of the line and intersects everywhere.
-	 * Return the end point, so we use the whole line segment.
-	 */
-	if (diff == 0.0f)
-		return p2x;
-
-	a = (y_arg - p2y) / diff;
-	return p2x + (p1x - p2x) * a;
-}
-
-enum path_transition {
-	PATH_TRANSITION_OUT_TO_OUT = 0,
-	PATH_TRANSITION_OUT_TO_IN = 1,
-	PATH_TRANSITION_IN_TO_OUT = 2,
-	PATH_TRANSITION_IN_TO_IN = 3,
-};
-
-static void
-clip_append_vertex(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	*ctx->vertices.x++ = x;
-	*ctx->vertices.y++ = y;
-}
-
-static enum path_transition
-path_transition_left_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.x >= ctx->clip.x1) << 1) | (x >= ctx->clip.x1);
-}
-
-static enum path_transition
-path_transition_right_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.x < ctx->clip.x2) << 1) | (x < ctx->clip.x2);
-}
-
-static enum path_transition
-path_transition_top_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.y >= ctx->clip.y1) << 1) | (y >= ctx->clip.y1);
-}
-
-static enum path_transition
-path_transition_bottom_edge(struct clip_context *ctx, GLfloat x, GLfloat y)
-{
-	return ((ctx->prev.y < ctx->clip.y2) << 1) | (y < ctx->clip.y2);
-}
-
-static void
-clip_polygon_leftright(struct clip_context *ctx,
-		       enum path_transition transition,
-		       GLfloat x, GLfloat y, GLfloat clip_x)
-{
-	GLfloat yi;
-
-	switch (transition) {
-	case PATH_TRANSITION_IN_TO_IN:
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_IN_TO_OUT:
-		yi = clip_intersect_y(ctx->prev.x, ctx->prev.y, x, y, clip_x);
-		clip_append_vertex(ctx, clip_x, yi);
-		break;
-	case PATH_TRANSITION_OUT_TO_IN:
-		yi = clip_intersect_y(ctx->prev.x, ctx->prev.y, x, y, clip_x);
-		clip_append_vertex(ctx, clip_x, yi);
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_OUT_TO_OUT:
-		/* nothing */
-		break;
-	default:
-		assert(0 && "bad enum path_transition");
-	}
-
-	ctx->prev.x = x;
-	ctx->prev.y = y;
-}
-
-static void
-clip_polygon_topbottom(struct clip_context *ctx,
-		       enum path_transition transition,
-		       GLfloat x, GLfloat y, GLfloat clip_y)
-{
-	GLfloat xi;
-
-	switch (transition) {
-	case PATH_TRANSITION_IN_TO_IN:
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_IN_TO_OUT:
-		xi = clip_intersect_x(ctx->prev.x, ctx->prev.y, x, y, clip_y);
-		clip_append_vertex(ctx, xi, clip_y);
-		break;
-	case PATH_TRANSITION_OUT_TO_IN:
-		xi = clip_intersect_x(ctx->prev.x, ctx->prev.y, x, y, clip_y);
-		clip_append_vertex(ctx, xi, clip_y);
-		clip_append_vertex(ctx, x, y);
-		break;
-	case PATH_TRANSITION_OUT_TO_OUT:
-		/* nothing */
-		break;
-	default:
-		assert(0 && "bad enum path_transition");
-	}
-
-	ctx->prev.x = x;
-	ctx->prev.y = y;
-}
-
-static void
-clip_context_prepare(struct clip_context *ctx, const struct polygon8 *src,
-		      GLfloat *dst_x, GLfloat *dst_y)
-{
-	ctx->prev.x = src->x[src->n - 1];
-	ctx->prev.y = src->y[src->n - 1];
-	ctx->vertices.x = dst_x;
-	ctx->vertices.y = dst_y;
-}
-
-static int
-clip_polygon_left(struct clip_context *ctx, const struct polygon8 *src,
-		  GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_left_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_leftright(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.x1);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_right(struct clip_context *ctx, const struct polygon8 *src,
-		   GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_right_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_leftright(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.x2);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_top(struct clip_context *ctx, const struct polygon8 *src,
-		 GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_top_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_topbottom(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.y1);
-	}
-	return ctx->vertices.x - dst_x;
-}
-
-static int
-clip_polygon_bottom(struct clip_context *ctx, const struct polygon8 *src,
-		    GLfloat *dst_x, GLfloat *dst_y)
-{
-	enum path_transition trans;
-	int i;
-
-	clip_context_prepare(ctx, src, dst_x, dst_y);
-	for (i = 0; i < src->n; i++) {
-		trans = path_transition_bottom_edge(ctx, src->x[i], src->y[i]);
-		clip_polygon_topbottom(ctx, trans, src->x[i], src->y[i],
-				       ctx->clip.y2);
-	}
-	return ctx->vertices.x - dst_x;
-}
+/* Keep this in sync with what is in gl-renderer.c! */
 
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #define min(a, b) (((a) > (b)) ? (b) : (a))
-#define clip(x, a, b)  min(max(x, a), b)
 
 /*
  * Compute the boundary vertices of the intersection of the global coordinate
@@ -356,10 +98,10 @@ clip_polygon_bottom(struct clip_context *ctx, const struct polygon8 *src,
  * polygon area.
  */
 static int
-calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
+calculate_edges(struct weston_view *ev, pixman_box32_t *rect,
 		pixman_box32_t *surf_rect, GLfloat *ex, GLfloat *ey)
 {
-	struct polygon8 polygon;
+
 	struct clip_context ctx;
 	int i, n;
 	GLfloat min_x, max_x, min_y, max_y;
@@ -376,8 +118,8 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 
 	/* transform surface to screen space: */
 	for (i = 0; i < surf.n; i++)
-		weston_surface_to_global_float(es, surf.x[i], surf.y[i],
-					       &surf.x[i], &surf.y[i]);
+		weston_view_to_global_float(ev, surf.x[i], surf.y[i],
+					    &surf.x[i], &surf.y[i]);
 
 	/* find bounding box: */
 	min_x = max_x = surf.x[0];
@@ -401,13 +143,8 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 	 * there will be only four edges.  We just need to clip the surface
 	 * vertices to the clip rect bounds:
 	 */
-	if (!es->transform.enabled) {
-		for (i = 0; i < surf.n; i++) {
-			ex[i] = clip(surf.x[i], ctx.clip.x1, ctx.clip.x2);
-			ey[i] = clip(surf.y[i], ctx.clip.y1, ctx.clip.y2);
-		}
-		return surf.n;
-	}
+	if (!ev->transform.enabled)
+		return clip_simple(&ctx, &surf, ex, ey);
 
 	/* Transformed case: use a general polygon clipping algorithm to
 	 * clip the surface rectangle with each side of 'rect'.
@@ -415,26 +152,7 @@ calculate_edges(struct weston_surface *es, pixman_box32_t *rect,
 	 * http://www.codeguru.com/cpp/misc/misc/graphics/article.php/c8965/Polygon-Clipping.htm
 	 * but without looking at any of that code.
 	 */
-	polygon.n = clip_polygon_left(&ctx, &surf, polygon.x, polygon.y);
-	surf.n = clip_polygon_right(&ctx, &polygon, surf.x, surf.y);
-	polygon.n = clip_polygon_top(&ctx, &surf, polygon.x, polygon.y);
-	surf.n = clip_polygon_bottom(&ctx, &polygon, surf.x, surf.y);
-
-	/* Get rid of duplicate vertices */
-	ex[0] = surf.x[0];
-	ey[0] = surf.y[0];
-	n = 1;
-	for (i = 1; i < surf.n; i++) {
-		if (float_difference(ex[n - 1], surf.x[i]) == 0.0f &&
-		    float_difference(ey[n - 1], surf.y[i]) == 0.0f)
-			continue;
-		ex[n] = surf.x[i];
-		ey[n] = surf.y[i];
-		n++;
-	}
-	if (float_difference(ex[n - 1], surf.x[0]) == 0.0f &&
-	    float_difference(ey[n - 1], surf.y[0]) == 0.0f)
-		n--;
+	n = clip_transformed(&ctx, &surf, ex, ey);
 
 	if (n < 3)
 		return 0;
@@ -486,7 +204,7 @@ struct cliptest {
 	struct ui_state ui;
 
 	struct geometry geometry;
-	struct weston_surface surface;
+	struct weston_view view;
 };
 
 static void
@@ -529,15 +247,15 @@ draw_coordinates(cairo_t *cr, double ox, double oy, GLfloat *x, GLfloat *y, int 
 }
 
 static void
-draw_box(cairo_t *cr, pixman_box32_t *box, struct weston_surface *surface)
+draw_box(cairo_t *cr, pixman_box32_t *box, struct weston_view *view)
 {
 	GLfloat x[4], y[4];
 
-	if (surface) {
-		weston_surface_to_global_float(surface, box->x1, box->y1, &x[0], &y[0]);
-		weston_surface_to_global_float(surface, box->x2, box->y1, &x[1], &y[1]);
-		weston_surface_to_global_float(surface, box->x2, box->y2, &x[2], &y[2]);
-		weston_surface_to_global_float(surface, box->x1, box->y2, &x[3], &y[3]);
+	if (view) {
+		weston_view_to_global_float(view, box->x1, box->y1, &x[0], &y[0]);
+		weston_view_to_global_float(view, box->x2, box->y1, &x[1], &y[1]);
+		weston_view_to_global_float(view, box->x2, box->y2, &x[2], &y[2]);
+		weston_view_to_global_float(view, box->x1, box->y2, &x[3], &y[3]);
 	} else {
 		x[0] = box->x1; y[0] = box->y1;
 		x[1] = box->x2; y[1] = box->y1;
@@ -549,18 +267,18 @@ draw_box(cairo_t *cr, pixman_box32_t *box, struct weston_surface *surface)
 }
 
 static void
-draw_geometry(cairo_t *cr, struct weston_surface *surface,
+draw_geometry(cairo_t *cr, struct weston_view *view,
 	      GLfloat *ex, GLfloat *ey, int n)
 {
-	struct geometry *g = surface->geometry;
-	GLfloat cx, cy;
+	struct geometry *g = view->geometry;
+	float cx, cy;
 
-	draw_box(cr, &g->surf, surface);
+	draw_box(cr, &g->surf, view);
 	cairo_set_source_rgba(cr, 1.0, 0.0, 0.0, 0.4);
 	cairo_fill(cr);
-	weston_surface_to_global_float(surface, g->surf.x1 - 4, g->surf.y1 - 4, &cx, &cy);
+	weston_view_to_global_float(view, g->surf.x1 - 4, g->surf.y1 - 4, &cx, &cy);
 	cairo_arc(cr, cx, cy, 1.5, 0.0, 2.0 * M_PI);
-	if (surface->transform.enabled == 0)
+	if (view->transform.enabled == 0)
 		cairo_set_source_rgba(cr, 1.0, 0.0, 0.0, 0.8);
 	cairo_fill(cr);
 
@@ -568,19 +286,21 @@ draw_geometry(cairo_t *cr, struct weston_surface *surface,
 	cairo_set_source_rgba(cr, 0.0, 0.0, 1.0, 0.4);
 	cairo_fill(cr);
 
-	draw_polygon_closed(cr, ex, ey, n);
-	cairo_set_source_rgb(cr, 0.0, 1.0, 0.0);
-	cairo_stroke(cr);
+	if (n) {
+		draw_polygon_closed(cr, ex, ey, n);
+		cairo_set_source_rgb(cr, 0.0, 1.0, 0.0);
+		cairo_stroke(cr);
 
-	cairo_set_source_rgba(cr, 0.0, 1.0, 0.0, 0.5);
-	draw_polygon_labels(cr, ex, ey, n);
+		cairo_set_source_rgba(cr, 0.0, 1.0, 0.0, 0.5);
+		draw_polygon_labels(cr, ex, ey, n);
+	}
 }
 
 static void
 redraw_handler(struct widget *widget, void *data)
 {
 	struct cliptest *cliptest = data;
-	struct geometry *g = cliptest->surface.geometry;
+	struct geometry *g = cliptest->view.geometry;
 	struct rectangle allocation;
 	cairo_t *cr;
 	cairo_surface_t *surface;
@@ -588,7 +308,7 @@ redraw_handler(struct widget *widget, void *data)
 	GLfloat ey[8];
 	int n;
 
-	n = calculate_edges(&cliptest->surface, &g->clip, &g->surf, ex, ey);
+	n = calculate_edges(&cliptest->view, &g->clip, &g->surf, ex, ey);
 
 	widget_get_allocation(cliptest->widget, &allocation);
 
@@ -622,7 +342,7 @@ redraw_handler(struct widget *widget, void *data)
 		cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
 				       CAIRO_FONT_WEIGHT_BOLD);
 		cairo_set_font_size(cr, 5.0);
-		draw_geometry(cr, &cliptest->surface, ex, ey, n);
+		draw_geometry(cr, &cliptest->view, ex, ey, n);
 	cairo_pop_group_to_source(cr);
 	cairo_paint(cr);
 
@@ -701,7 +421,7 @@ axis_handler(struct widget *widget, struct input *input, uint32_t time,
 
 	geometry_set_phi(geom, geom->phi +
 				(M_PI / 12.0) * wl_fixed_to_double(value));
-	cliptest->surface.transform.enabled = 1;
+	cliptest->view.transform.enabled = 1;
 
 	widget_schedule_redraw(cliptest->widget);
 }
@@ -751,15 +471,15 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 		break;
 	case XKB_KEY_n:
 		geometry_set_phi(g, g->phi + (M_PI / 24.0));
-		cliptest->surface.transform.enabled = 1;
+		cliptest->view.transform.enabled = 1;
 		break;
 	case XKB_KEY_m:
 		geometry_set_phi(g, g->phi - (M_PI / 24.0));
-		cliptest->surface.transform.enabled = 1;
+		cliptest->view.transform.enabled = 1;
 		break;
 	case XKB_KEY_r:
 		geometry_set_phi(g, 0.0);
-		cliptest->surface.transform.enabled = 0;
+		cliptest->view.transform.enabled = 0;
 		break;
 	default:
 		return;
@@ -792,13 +512,13 @@ cliptest_create(struct display *display)
 	struct cliptest *cliptest;
 
 	cliptest = xzalloc(sizeof *cliptest);
-	cliptest->surface.geometry = &cliptest->geometry;
-	cliptest->surface.transform.enabled = 0;
+	cliptest->view.geometry = &cliptest->geometry;
+	cliptest->view.transform.enabled = 0;
 	geometry_init(&cliptest->geometry);
 	geometry_init(&cliptest->ui.geometry);
 
 	cliptest->window = window_create(display);
-	cliptest->widget = frame_create(cliptest->window, cliptest);
+	cliptest->widget = window_frame_create(cliptest->window, cliptest);
 	window_set_title(cliptest->window, "cliptest");
 	cliptest->display = display;
 
@@ -843,7 +563,7 @@ read_timer(void)
 static int
 benchmark(void)
 {
-	struct weston_surface surface;
+	struct weston_view view;
 	struct geometry geom;
 	GLfloat ex[8], ey[8];
 	int i;
@@ -862,13 +582,13 @@ benchmark(void)
 
 	geometry_set_phi(&geom, 0.0);
 
-	surface.transform.enabled = 1;
-	surface.geometry = &geom;
+	view.transform.enabled = 1;
+	view.geometry = &geom;
 
 	reset_timer();
 	for (i = 0; i < N; i++) {
 		geometry_set_phi(&geom, (float)i / 360.0f);
-		calculate_edges(&surface, &geom.clip, &geom.surf, ex, ey);
+		calculate_edges(&view, &geom.clip, &geom.surf, ex, ey);
 	}
 	t = read_timer();
 
@@ -877,14 +597,26 @@ benchmark(void)
 	return 0;
 }
 
+static void
+cliptest_destroy(struct cliptest *cliptest)
+{
+	widget_destroy(cliptest->widget);
+	window_destroy(cliptest->window);
+	free(cliptest);
+}
+
 int
 main(int argc, char *argv[])
 {
 	struct display *d;
 	struct cliptest *cliptest;
 
-	if (argc > 1)
-		return benchmark();
+	if (argc > 1) {
+		if (argc == 2 && !strcmp(argv[1], "-b"))
+			return benchmark();
+		printf("Usage: %s [OPTIONS]\n  -b  run benchmark\n", argv[0]);
+		return 1;
+	}
 
 	d = display_create(&argc, argv);
 	if (d == NULL) {
@@ -895,9 +627,8 @@ main(int argc, char *argv[])
 	cliptest = cliptest_create(d);
 	display_run(d);
 
-	widget_destroy(cliptest->widget);
-	window_destroy(cliptest->window);
-	free(cliptest);
+	cliptest_destroy(cliptest);
+	display_destroy(d);
 
 	return 0;
 }

@@ -1,23 +1,24 @@
 /*
  * Copyright © 2008 Kristian Høgsberg
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <config.h>
@@ -38,9 +39,12 @@
 #include <wchar.h>
 #include <locale.h>
 
+#include <linux/input.h>
+
 #include <wayland-client.h>
 
-#include "../shared/config-parser.h"
+#include "shared/config-parser.h"
+#include "shared/helpers.h"
 #include "window.h"
 
 static int option_fullscreen;
@@ -130,28 +134,28 @@ utf8_next_char(struct utf8_state_machine *machine, unsigned char c)
 	case utf8state_reject:
 		machine->s.ch = 0;
 		machine->len = 0;
-		if(c == 0xC0 || c == 0xC1) {
+		if (c == 0xC0 || c == 0xC1) {
 			/* overlong encoding, reject */
 			machine->state = utf8state_reject;
-		} else if((c & 0x80) == 0) {
+		} else if ((c & 0x80) == 0) {
 			/* single byte, accept */
 			machine->s.byte[machine->len++] = c;
 			machine->state = utf8state_accept;
 			machine->unicode = c;
-		} else if((c & 0xC0) == 0x80) {
+		} else if ((c & 0xC0) == 0x80) {
 			/* parser out of sync, ignore byte */
 			machine->state = utf8state_start;
-		} else if((c & 0xE0) == 0xC0) {
+		} else if ((c & 0xE0) == 0xC0) {
 			/* start of two byte sequence */
 			machine->s.byte[machine->len++] = c;
 			machine->state = utf8state_expect1;
 			machine->unicode = c & 0x1f;
-		} else if((c & 0xF0) == 0xE0) {
+		} else if ((c & 0xF0) == 0xE0) {
 			/* start of three byte sequence */
 			machine->s.byte[machine->len++] = c;
 			machine->state = utf8state_expect2;
 			machine->unicode = c & 0x0f;
-		} else if((c & 0xF8) == 0xF0) {
+		} else if ((c & 0xF8) == 0xF0) {
 			/* start of four byte sequence */
 			machine->s.byte[machine->len++] = c;
 			machine->state = utf8state_expect3;
@@ -164,7 +168,7 @@ utf8_next_char(struct utf8_state_machine *machine, unsigned char c)
 	case utf8state_expect3:
 		machine->s.byte[machine->len++] = c;
 		machine->unicode = (machine->unicode << 6) | (c & 0x3f);
-		if((c & 0xC0) == 0x80) {
+		if ((c & 0xC0) == 0x80) {
 			/* all good, continue */
 			machine->state = utf8state_expect2;
 		} else {
@@ -175,7 +179,7 @@ utf8_next_char(struct utf8_state_machine *machine, unsigned char c)
 	case utf8state_expect2:
 		machine->s.byte[machine->len++] = c;
 		machine->unicode = (machine->unicode << 6) | (c & 0x3f);
-		if((c & 0xC0) == 0x80) {
+		if ((c & 0xC0) == 0x80) {
 			/* all good, continue */
 			machine->state = utf8state_expect1;
 		} else {
@@ -186,7 +190,7 @@ utf8_next_char(struct utf8_state_machine *machine, unsigned char c)
 	case utf8state_expect1:
 		machine->s.byte[machine->len++] = c;
 		machine->unicode = (machine->unicode << 6) | (c & 0x3f);
-		if((c & 0xC0) == 0x80) {
+		if ((c & 0xC0) == 0x80) {
 			/* all good, accept */
 			machine->state = utf8state_accept;
 		} else {
@@ -198,7 +202,7 @@ utf8_next_char(struct utf8_state_machine *machine, unsigned char c)
 		machine->state = utf8state_reject;
 		break;
 	}
-	
+
 	return machine->state;
 }
 
@@ -282,7 +286,7 @@ static void
 apply_char_set(character_set cs, union utf8_char *utf8)
 {
 	int i = 0;
-	
+
 	while (cs[i].match.byte[0]) {
 		if ((*utf8).ch == cs[i].match.ch) {
 			*utf8 = cs[i].replace;
@@ -359,7 +363,7 @@ apply_key_map(keyboard_mode mode, int sym, uint32_t modifiers, char *response)
 	struct key_map map;
 	int len = 0;
 	int i = 0;
-	
+
 	while (mode[i].sym) {
 		map = mode[i++];
 		if (sym == map.sym) {
@@ -369,7 +373,7 @@ apply_key_map(keyboard_mode mode, int sym, uint32_t modifiers, char *response)
 			break;
 		}
 	}
-	
+
 	return len;
 }
 
@@ -426,6 +430,7 @@ struct terminal {
 	struct window *window;
 	struct widget *widget;
 	struct display *display;
+	char *title;
 	union utf8_char *data;
 	struct task io_task;
 	char *tab_ruler;
@@ -441,8 +446,12 @@ struct terminal {
 	character_set saved_cs, saved_g0, saved_g1;
 	keyboard_mode key_mode;
 	int data_pitch, attr_pitch;  /* The width in bytes of a line */
-	int width, height, start, row, column;
+	int width, height, row, column, max_width;
+	uint32_t buffer_height;
+	uint32_t start, end, saved_start, log_size;
+	wl_fixed_t smooth_scroll;
 	int saved_row, saved_column;
+	int scrolling;
 	int send_cursor_position;
 	int fd, master;
 	uint32_t modifiers;
@@ -459,9 +468,10 @@ struct terminal {
 	double average_width;
 	cairo_scaled_font_t *font_normal, *font_bold;
 	uint32_t hide_cursor_serial;
+	int size_in_title;
 
 	struct wl_data_source *selection;
-	uint32_t button_time;
+	uint32_t click_time;
 	int dragging, click_count;
 	int selection_start_x, selection_start_y;
 	int selection_end_x, selection_end_y;
@@ -475,7 +485,7 @@ static void
 terminal_init_tabs(struct terminal *terminal)
 {
 	int i = 0;
-	
+
 	while (i < terminal->width) {
 		if (i % 8 == 0)
 			terminal->tab_ruler[i] = 1;
@@ -545,9 +555,9 @@ terminal_get_row(struct terminal *terminal, int row)
 {
 	int index;
 
-	index = (row + terminal->start) % terminal->height;
+	index = (row + terminal->start) & (terminal->buffer_height - 1);
 
-	return &terminal->data[index * terminal->width];
+	return (void *) terminal->data + index * terminal->data_pitch;
 }
 
 static struct attr*
@@ -555,9 +565,9 @@ terminal_get_attr_row(struct terminal *terminal, int row)
 {
 	int index;
 
-	index = (row + terminal->start) % terminal->height;
+	index = (row + terminal->start) & (terminal->buffer_height - 1);
 
-	return &terminal->data_attr[index * terminal->width];
+	return (void *) terminal->data_attr + index * terminal->attr_pitch;
 }
 
 union decoded_attr {
@@ -620,18 +630,16 @@ terminal_scroll_buffer(struct terminal *terminal, int d)
 {
 	int i;
 
-	d = d % (terminal->height + 1);
-	terminal->start = (terminal->start + d) % terminal->height;
-	if (terminal->start < 0) terminal->start = terminal->height + terminal->start;
-	if(d < 0) {
+	terminal->start += d;
+	if (d < 0) {
 		d = 0 - d;
-		for(i = 0; i < d; i++) {
+		for (i = 0; i < d; i++) {
 			memset(terminal_get_row(terminal, i), 0, terminal->data_pitch);
 			attr_init(terminal_get_attr_row(terminal, i),
 			    terminal->curr_attr, terminal->width);
 		}
 	} else {
-		for(i = terminal->height - d; i < terminal->height; i++) {
+		for (i = terminal->height - d; i < terminal->height; i++) {
 			memset(terminal_get_row(terminal, i), 0, terminal->data_pitch);
 			attr_init(terminal_get_attr_row(terminal, i),
 			    terminal->curr_attr, terminal->width);
@@ -648,15 +656,15 @@ terminal_scroll_window(struct terminal *terminal, int d)
 	int i;
 	int window_height;
 	int from_row, to_row;
-	
+
 	// scrolling range is inclusive
 	window_height = terminal->margin_bottom - terminal->margin_top + 1;
 	d = d % (window_height + 1);
-	if(d < 0) {
+	if (d < 0) {
 		d = 0 - d;
 		to_row = terminal->margin_bottom;
 		from_row = terminal->margin_bottom - d;
-		
+
 		for (i = 0; i < (window_height - d); i++) {
 			memcpy(terminal_get_row(terminal, to_row - i),
 			       terminal_get_row(terminal, from_row - i),
@@ -673,7 +681,7 @@ terminal_scroll_window(struct terminal *terminal, int d)
 	} else {
 		to_row = terminal->margin_top;
 		from_row = terminal->margin_top + d;
-		
+
 		for (i = 0; i < (window_height - d); i++) {
 			memcpy(terminal_get_row(terminal, to_row + i),
 			       terminal_get_row(terminal, from_row + i),
@@ -693,7 +701,7 @@ terminal_scroll_window(struct terminal *terminal, int d)
 static void
 terminal_scroll(struct terminal *terminal, int d)
 {
-	if(terminal->margin_top == 0 && terminal->margin_bottom == terminal->height - 1)
+	if (terminal->margin_top == 0 && terminal->margin_bottom == terminal->height - 1)
 		terminal_scroll_buffer(terminal, d);
 	else
 		terminal_scroll_window(terminal, d);
@@ -704,7 +712,7 @@ terminal_shift_line(struct terminal *terminal, int d)
 {
 	union utf8_char *row;
 	struct attr *attr_row;
-	
+
 	row = terminal_get_row(terminal, terminal->row);
 	attr_row = terminal_get_attr_row(terminal, terminal->row);
 
@@ -712,7 +720,7 @@ terminal_shift_line(struct terminal *terminal, int d)
 		d = terminal->column + 1 - terminal->width;
 	if ((terminal->column + d) >= terminal->width)
 		d = terminal->width - terminal->column - 1;
-	
+
 	if (d < 0) {
 		d = 0 - d;
 		memmove(&row[terminal->column],
@@ -733,68 +741,90 @@ terminal_shift_line(struct terminal *terminal, int d)
 }
 
 static void
-terminal_resize_cells(struct terminal *terminal, int width, int height)
+terminal_resize_cells(struct terminal *terminal,
+		      int width, int height)
 {
-	size_t size;
 	union utf8_char *data;
 	struct attr *data_attr;
 	char *tab_ruler;
 	int data_pitch, attr_pitch;
 	int i, l, total_rows;
+	uint32_t d, uheight = height;
 	struct rectangle allocation;
 	struct winsize ws;
+
+	if (uheight > terminal->buffer_height)
+		height = terminal->buffer_height;
 
 	if (terminal->width == width && terminal->height == height)
 		return;
 
-	data_pitch = width * sizeof(union utf8_char);
-	size = data_pitch * height;
-	data = zalloc(size);
-	attr_pitch = width * sizeof(struct attr);
-	data_attr = malloc(attr_pitch * height);
-	tab_ruler = zalloc(width);
-	attr_init(data_attr, terminal->curr_attr, width * height);
-	if (terminal->data && terminal->data_attr) {
-		if (width > terminal->width)
-			l = terminal->width;
-		else
-			l = width;
+	if (terminal->data && width <= terminal->max_width) {
+		d = 0;
+		if (height < terminal->height && height <= terminal->row)
+			d = terminal->height - height;
+		else if (height > terminal->height &&
+			 terminal->height - 1 == terminal->row) {
+			d = terminal->height - height;
+			if (terminal->log_size < uheight)
+				d = -terminal->start;
+		}
 
-		if (terminal->height > height) {
-			total_rows = height;
-			i = 1 + terminal->row - height;
-			if (i > 0) {
-			    terminal->start = (terminal->start + i) % terminal->height;
-			    terminal->row = terminal->row - i;
+		terminal->start += d;
+		terminal->row -= d;
+	} else {
+		terminal->max_width = width;
+		data_pitch = width * sizeof(union utf8_char);
+		data = xzalloc(data_pitch * terminal->buffer_height);
+		attr_pitch = width * sizeof(struct attr);
+		data_attr = xmalloc(attr_pitch * terminal->buffer_height);
+		tab_ruler = xzalloc(width);
+		attr_init(data_attr, terminal->curr_attr,
+			  width * terminal->buffer_height);
+
+		if (terminal->data && terminal->data_attr) {
+			if (width > terminal->width)
+				l = terminal->width;
+			else
+				l = width;
+
+			if (terminal->height > height) {
+				total_rows = height;
+				i = 1 + terminal->row - height;
+				if (i > 0) {
+					terminal->start += i;
+					terminal->row = terminal->row - i;
+				}
+			} else {
+				total_rows = terminal->height;
 			}
-		} else {
-			total_rows = terminal->height;
+
+			for (i = 0; i < total_rows; i++) {
+				memcpy(&data[width * i],
+				       terminal_get_row(terminal, i),
+				       l * sizeof(union utf8_char));
+				memcpy(&data_attr[width * i],
+				       terminal_get_attr_row(terminal, i),
+				       l * sizeof(struct attr));
+			}
+
+			free(terminal->data);
+			free(terminal->data_attr);
+			free(terminal->tab_ruler);
 		}
 
-		for (i = 0; i < total_rows; i++) {
-			memcpy(&data[width * i],
-			       terminal_get_row(terminal, i),
-			       l * sizeof(union utf8_char));
-			memcpy(&data_attr[width * i],
-			       terminal_get_attr_row(terminal, i),
-			       l * sizeof(struct attr));
-		}
-
-		free(terminal->data);
-		free(terminal->data_attr);
-		free(terminal->tab_ruler);
+		terminal->data_pitch = data_pitch;
+		terminal->attr_pitch = attr_pitch;
+		terminal->data = data;
+		terminal->data_attr = data_attr;
+		terminal->tab_ruler = tab_ruler;
+		terminal->start = 0;
 	}
 
-	terminal->data_pitch = data_pitch;
-	terminal->attr_pitch = attr_pitch;
 	terminal->margin_bottom =
 		height - (terminal->height - terminal->margin_bottom);
 	terminal->width = width;
 	terminal->height = height;
-	terminal->data = data;
-	terminal->data_attr = data_attr;
-	terminal->tab_ruler = tab_ruler;
-	terminal->start = 0;
 	terminal_init_tabs(terminal);
 
 	/* Update the window size */
@@ -804,6 +834,20 @@ terminal_resize_cells(struct terminal *terminal, int width, int height)
 	ws.ws_xpixel = allocation.width;
 	ws.ws_ypixel = allocation.height;
 	ioctl(terminal->master, TIOCSWINSZ, &ws);
+}
+
+static void
+update_title(struct terminal *terminal)
+{
+	if (window_is_resizing(terminal->window)) {
+		char *p;
+		if (asprintf(&p, "%s — [%dx%d]", terminal->title, terminal->width, terminal->height) > 0) {
+			window_set_title(terminal->window, p);
+			free(p);
+		}
+	} else {
+		window_set_title(terminal->window, terminal->title);
+	}
 }
 
 static void
@@ -825,6 +869,14 @@ resize_handler(struct widget *widget,
 	}
 
 	terminal_resize_cells(terminal, columns, rows);
+	update_title(terminal);
+}
+
+static void
+state_changed_handler(struct window *window, void *data)
+{
+	struct terminal *terminal = data;
+	update_title(terminal);
 }
 
 static void
@@ -840,7 +892,7 @@ terminal_resize(struct terminal *terminal, int columns, int rows)
 	width = columns * terminal->average_width + m;
 	height = rows * terminal->extents.height + m;
 
-	frame_set_child_size(terminal->widget, width, height);
+	window_frame_set_child_size(terminal->widget, width, height);
 }
 
 struct color_scheme DEFAULT_COLORS = {
@@ -890,7 +942,7 @@ terminal_send_selection(struct terminal *terminal, int fd)
 		close(fd);
 		return;
 	}
-	for (row = 0; row < terminal->height; row++) {
+	for (row = terminal->selection_start_row; row < terminal->height; row++) {
 		p_row = terminal_get_row(terminal, row);
 		for (col = 0; col < terminal->width; col++) {
 			if (p_row[col].ch == 0x200B) /* space glyph */
@@ -1062,6 +1114,12 @@ redraw_handler(struct widget *widget, void *data)
 				cairo_stroke(cr);
 			}
 
+                        /* skip space glyph (RLE) we use as a placeholder of
+                           the right half of a double-width character,
+                           because RLE is not available in every font. */
+			if (p_row[col].ch == 0x200B)
+				continue;
+
 			glyph_run_add(&run, text_x, text_y, &p_row[col]);
 		}
 	}
@@ -1139,7 +1197,7 @@ handle_term_parameter(struct terminal *terminal, int code, int sr)
 				terminal_resize(terminal, 132, 24);
 			else
 				terminal_resize(terminal, 80, 24);
-			
+
 			/* set columns, but also home cursor and clear screen */
 			terminal->row = 0; terminal->column = 0;
 			for (i = 0; i < terminal->height; i++) {
@@ -1232,6 +1290,8 @@ handle_osc(struct terminal *terminal)
 	case 0: /* Icon name and window title */
 	case 1: /* Icon label */
 	case 2: /* Window title*/
+		free(terminal->title);
+		terminal->title = strdup(p);
 		window_set_title(terminal->window, p);
 		break;
 	case 7: /* shell cwd as uri */
@@ -1270,7 +1330,7 @@ handle_escape(struct terminal *terminal)
 			set[i] = 1;
 		}
 	}
-	
+
 	switch (*p) {
 	case '@':    /* ICH */
 		count = set[0] ? args[0] : 1;
@@ -1328,7 +1388,7 @@ handle_escape(struct terminal *terminal)
 	case 'G':    /* CHA */
 		y = set[0] ? args[0] : 1;
 		y = y <= 0 ? 1 : y > terminal->width ? terminal->width : y;
-		
+
 		terminal->column = y - 1;
 		break;
 	case 'f':    /* HVP */
@@ -1336,7 +1396,7 @@ handle_escape(struct terminal *terminal)
 		x = (set[1] ? args[1] : 1) - 1;
 		x = x < 0 ? 0 :
 		    (x >= terminal->width ? terminal->width - 1 : x);
-		
+
 		y = (set[0] ? args[0] : 1) - 1;
 		if (terminal->origin_mode) {
 			y += terminal->margin_top;
@@ -1346,7 +1406,7 @@ handle_escape(struct terminal *terminal)
 			y = y < 0 ? 0 :
 			    (y >= terminal->height ? terminal->height - 1 : y);
 		}
-		
+
 		terminal->row = y;
 		terminal->column = x;
 		break;
@@ -1383,12 +1443,9 @@ handle_escape(struct terminal *terminal)
 				    terminal->curr_attr, terminal->width);
 			}
 		} else if (args[0] == 2) {
-			for (i = 0; i < terminal->height; i++) {
-				memset(terminal_get_row(terminal, i),
-				    0, terminal->data_pitch);
-				attr_init(terminal_get_attr_row(terminal, i),
-				    terminal->curr_attr, terminal->width);
-			}
+			/* Clear screen by scrolling contents out */
+			terminal_scroll_buffer(terminal,
+					       terminal->end - terminal->start);
 		}
 		break;
 	case 'K':    /* EL */
@@ -1472,7 +1529,7 @@ handle_escape(struct terminal *terminal)
 	case '`':    /* HPA */
 		y = set[0] ? args[0] : 1;
 		y = y <= 0 ? 1 : y > terminal->width ? terminal->width : y;
-		
+
 		terminal->column = y - 1;
 		break;
 	case 'b':    /* REP */
@@ -1489,7 +1546,7 @@ handle_escape(struct terminal *terminal)
 	case 'd':    /* VPA */
 		x = set[0] ? args[0] : 1;
 		x = x <= 0 ? 1 : x > terminal->height ? terminal->height : x;
-		
+
 		terminal->row = x - 1;
 		break;
 	case 'g':    /* TBC */
@@ -1500,17 +1557,17 @@ handle_escape(struct terminal *terminal)
 		}
 		break;
 	case 'h':    /* SM */
-		for(i = 0; i < 10 && set[i]; i++) {
+		for (i = 0; i < 10 && set[i]; i++) {
 			handle_term_parameter(terminal, args[i], 1);
 		}
 		break;
 	case 'l':    /* RM */
-		for(i = 0; i < 10 && set[i]; i++) {
+		for (i = 0; i < 10 && set[i]; i++) {
 			handle_term_parameter(terminal, args[i], 0);
 		}
 		break;
 	case 'm':    /* SGR */
-		for(i = 0; i < 10; i++) {
+		for (i = 0; i < 10; i++) {
 			if (i <= 7 && set[i] && set[i + 1] &&
 				set[i + 2] && args[i + 1] == 5)
 			{
@@ -1522,9 +1579,9 @@ handle_escape(struct terminal *terminal)
 					break;
 				}
 			}
-			if(set[i]) {
+			if (set[i]) {
 				handle_sgr(terminal, args[i]);
-			} else if(i == 0) {
+			} else if (i == 0) {
 				handle_sgr(terminal, 0);
 				break;
 			} else {
@@ -1545,7 +1602,7 @@ handle_escape(struct terminal *terminal)
 		}
  		break;
 	case 'r':
-		if(!set[0]) {
+		if (!set[0]) {
 			terminal->margin_top = 0;
 			terminal->margin_bottom = terminal->height-1;
 			terminal->row = 0;
@@ -1557,14 +1614,14 @@ handle_escape(struct terminal *terminal)
 			bottom = (set[1] ? args[1] : 1) - 1;
 			bottom = bottom < 0 ? 0 :
 			         (bottom >= terminal->height ? terminal->height - 1 : bottom);
-			if(bottom > top) {
+			if (bottom > top) {
 				terminal->margin_top = top;
 				terminal->margin_bottom = bottom;
 			} else {
 				terminal->margin_top = 0;
 				terminal->margin_bottom = terminal->height-1;
 			}
-			if(terminal->origin_mode)
+			if (terminal->origin_mode)
 				terminal->row = terminal->margin_top;
 			else
 				terminal->row = 0;
@@ -1625,7 +1682,7 @@ handle_escape(struct terminal *terminal)
 	default:
 		fprintf(stderr, "Unknown CSI escape: %c\n", *p);
 		break;
-	}	
+	}
 }
 
 static void
@@ -1634,7 +1691,7 @@ handle_non_csi_escape(struct terminal *terminal, char code)
 	switch(code) {
 	case 'M':    /* RI */
 		terminal->row -= 1;
-		if(terminal->row < terminal->margin_top) {
+		if (terminal->row < terminal->margin_top) {
 			terminal->row = terminal->margin_top;
 			terminal_scroll(terminal, -1);
 		}
@@ -1644,7 +1701,7 @@ handle_non_csi_escape(struct terminal *terminal, char code)
 		// fallthrough
 	case 'D':    /* IND */
 		terminal->row += 1;
-		if(terminal->row > terminal->margin_bottom) {
+		if (terminal->row > terminal->margin_bottom) {
 			terminal->row = terminal->margin_bottom;
 			terminal_scroll(terminal, +1);
 		}
@@ -1696,7 +1753,7 @@ handle_special_escape(struct terminal *terminal, char special, char code)
 			/* fill with 'E', no cheap way to do this */
 			memset(terminal->data, 0, terminal->data_pitch * terminal->height);
 			numChars = terminal->width * terminal->height;
-			for(i = 0; i < numChars; i++) {
+			for (i = 0; i < numChars; i++) {
 				terminal->data[i].byte[0] = 'E';
 			}
 			break;
@@ -1784,19 +1841,19 @@ handle_sgr(struct terminal *terminal, int code)
 		terminal->curr_attr.bg = terminal->color_scheme->default_attr.bg;
 		break;
 	default:
-		if(code >= 30 && code <= 37) {
+		if (code >= 30 && code <= 37) {
 			terminal->curr_attr.fg = code - 30;
 			if (terminal->curr_attr.a & ATTRMASK_BOLD)
 				terminal->curr_attr.fg += 8;
-		} else if(code >= 40 && code <= 47) {
+		} else if (code >= 40 && code <= 47) {
 			terminal->curr_attr.bg = code - 40;
 		} else if (code >= 90 && code <= 97) {
 			terminal->curr_attr.fg = code - 90 + 8;
 		} else if (code >= 100 && code <= 107) {
 			terminal->curr_attr.bg = code - 100 + 8;
-		} else if(code >= 256 && code < 512) {
+		} else if (code >= 256 && code < 512) {
 			terminal->curr_attr.fg = code - 256;
-		} else if(code >= 512 && code < 768) {
+		} else if (code >= 512 && code < 768) {
 			terminal->curr_attr.bg = code - 512;
 		} else {
 			fprintf(stderr, "Unknown SGR code: %d\n", code);
@@ -1827,7 +1884,7 @@ handle_special_char(struct terminal *terminal, char c)
 	case '\v':
 	case '\f':
 		terminal->row++;
-		if(terminal->row > terminal->margin_bottom) {
+		if (terminal->row > terminal->margin_bottom) {
 			terminal->row = terminal->margin_bottom;
 			terminal_scroll(terminal, +1);
 		}
@@ -1881,7 +1938,7 @@ handle_special_char(struct terminal *terminal, char c)
 	default:
 		return 0;
 	}
-	
+
 	return 1;
 }
 
@@ -1890,24 +1947,24 @@ handle_char(struct terminal *terminal, union utf8_char utf8)
 {
 	union utf8_char *row;
 	struct attr *attr_row;
-	
+
 	if (handle_special_char(terminal, utf8.byte[0])) return;
 
 	apply_char_set(terminal->cs, &utf8);
-	
+
 	/* There are a whole lot of non-characters, control codes,
 	 * and formatting codes that should probably be ignored,
 	 * for example: */
 	if (strncmp((char*) utf8.byte, "\xEF\xBB\xBF", 3) == 0) {
 		/* BOM, ignore */
 		return;
-	} 
-	
+	}
+
 	/* Some of these non-characters should be translated, e.g.: */
 	if (utf8.byte[0] < 32) {
 		utf8.byte[0] = utf8.byte[0] + 64;
 	}
-	
+
 	/* handle right margin effects */
 	if (terminal->column >= terminal->width) {
 		if (terminal->mode & MODE_AUTOWRAP) {
@@ -1921,14 +1978,21 @@ handle_char(struct terminal *terminal, union utf8_char utf8)
 			terminal->column--;
  		}
  	}
-	
+
 	row = terminal_get_row(terminal, terminal->row);
 	attr_row = terminal_get_attr_row(terminal, terminal->row);
-	
+
 	if (terminal->mode & MODE_IRM)
 		terminal_shift_line(terminal, +1);
 	row[terminal->column] = utf8;
 	attr_row[terminal->column++] = terminal->curr_attr;
+
+	if (terminal->row + terminal->start + 1 > terminal->end)
+		terminal->end = terminal->row + terminal->start + 1;
+	if (terminal->end == terminal->buffer_height)
+		terminal->log_size = terminal->buffer_height;
+	else if (terminal->log_size < terminal->buffer_height)
+		terminal->log_size = terminal->end;
 
 	/* cursor jump for wide character. */
 	if (is_wide(utf8))
@@ -2034,7 +2098,7 @@ terminal_data(struct terminal *terminal, const char *data, size_t length)
 				if (terminal->escape_length >= MAX_ESCAPE)
 					terminal->state = escape_state_normal;
 			}
-			
+
 			if (isalpha(utf8.byte[0]) || utf8.byte[0] == '@' ||
 				utf8.byte[0] == '`')
 			{
@@ -2177,45 +2241,90 @@ fullscreen_handler(struct window *window, void *data)
 }
 
 static void
-close_handler(struct window *window, void *data)
+close_handler(void *data)
 {
 	struct terminal *terminal = data;
 
 	terminal_destroy(terminal);
 }
 
+static void
+terminal_copy(struct terminal *terminal, struct input *input)
+{
+	terminal->selection =
+		display_create_data_source(terminal->display);
+	wl_data_source_offer(terminal->selection,
+			     "text/plain;charset=utf-8");
+	wl_data_source_add_listener(terminal->selection,
+				    &data_source_listener, terminal);
+	input_set_selection(input, terminal->selection,
+			    display_get_serial(terminal->display));
+}
+
+static void
+terminal_paste(struct terminal *terminal, struct input *input)
+{
+	input_receive_selection_data_to_fd(input,
+					   "text/plain;charset=utf-8",
+					   terminal->master);
+
+}
+
+static void
+terminal_new_instance(struct terminal *terminal)
+{
+	struct terminal *new_terminal;
+
+	new_terminal = terminal_create(terminal->display);
+	if (terminal_run(new_terminal, option_shell))
+		terminal_destroy(new_terminal);
+}
+
 static int
 handle_bound_key(struct terminal *terminal,
 		 struct input *input, uint32_t sym, uint32_t time)
 {
-	struct terminal *new_terminal;
-
 	switch (sym) {
 	case XKB_KEY_X:
 		/* Cut selection; terminal doesn't do cut, fall
 		 * through to copy. */
 	case XKB_KEY_C:
-		terminal->selection =
-			display_create_data_source(terminal->display);
-		wl_data_source_offer(terminal->selection,
-				     "text/plain;charset=utf-8");
-		wl_data_source_add_listener(terminal->selection,
-					    &data_source_listener, terminal);
-		input_set_selection(input, terminal->selection,
-				    display_get_serial(terminal->display));
+		terminal_copy(terminal, input);
 		return 1;
 	case XKB_KEY_V:
-		input_receive_selection_data_to_fd(input,
-						   "text/plain;charset=utf-8",
-						   terminal->master);
-
+		terminal_paste(terminal, input);
+		return 1;
+	case XKB_KEY_N:
+		terminal_new_instance(terminal);
 		return 1;
 
-	case XKB_KEY_N:
-		new_terminal = terminal_create(terminal->display);
-		if (terminal_run(new_terminal, option_shell))
-			terminal_destroy(new_terminal);
+	case XKB_KEY_Up:
+		if (!terminal->scrolling)
+			terminal->saved_start = terminal->start;
+		if (terminal->start == terminal->end - terminal->log_size)
+			return 1;
 
+		terminal->scrolling = 1;
+		terminal->start--;
+		terminal->row++;
+		terminal->selection_start_row++;
+		terminal->selection_end_row++;
+		widget_schedule_redraw(terminal->widget);
+		return 1;
+
+	case XKB_KEY_Down:
+		if (!terminal->scrolling)
+			terminal->saved_start = terminal->start;
+
+		if (terminal->start == terminal->saved_start)
+			return 1;
+
+		terminal->scrolling = 1;
+		terminal->start++;
+		terminal->row--;
+		terminal->selection_start_row--;
+		terminal->selection_end_row--;
+		widget_schedule_redraw(terminal->widget);
 		return 1;
 
 	default:
@@ -2231,7 +2340,7 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 	struct terminal *terminal = data;
 	char ch[MAX_RESPONSE];
 	uint32_t modifiers, serial;
-	int ret, len = 0;
+	int ret, len = 0, d;
 	bool convert_utf8 = true;
 
 	modifiers = input_get_modifiers(input);
@@ -2396,7 +2505,7 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 		/* Handle special keys with alternate mappings */
 		len = apply_key_map(terminal->key_mode, sym, modifiers, ch);
 		if (len != 0) break;
-		
+
 		if (modifiers & MOD_CONTROL_MASK) {
 			if (sym >= '3' && sym <= '7')
 				sym = (sym & 0x1f) + 8;
@@ -2435,6 +2544,16 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 	}
 
 	if (state == WL_KEYBOARD_KEY_STATE_PRESSED && len > 0) {
+		if (terminal->scrolling) {
+			d = terminal->saved_start - terminal->start;
+			terminal->row -= d;
+			terminal->selection_start_row -= d;
+			terminal->selection_end_row -= d;
+			terminal->start = terminal->saved_start;
+			terminal->scrolling = 0;
+			widget_schedule_redraw(terminal->widget);
+		}
+
 		terminal_write(terminal, ch, len);
 
 		/* Hide cursor, except if this was coming from a
@@ -2460,7 +2579,7 @@ static int wordsep(int ch)
 {
 	const char extra[] = "-,./?%&#:_=+@~";
 
-	if (ch > 127)
+	if (ch > 127 || ch < 0)
 		return 1;
 
 	return ch == 0 || !(isalpha(ch) || isdigit(ch) || strchr(extra, ch));
@@ -2564,36 +2683,90 @@ recompute_selection(struct terminal *terminal)
 }
 
 static void
+terminal_minimize(struct terminal *terminal)
+{
+	window_set_minimized(terminal->window);
+}
+
+static void
+menu_func(void *data, struct input *input, int index)
+{
+	struct window *window = data;
+	struct terminal *terminal = window_get_user_data(window);
+
+	fprintf(stderr, "picked entry %d\n", index);
+
+	switch (index) {
+	case 0:
+		terminal_new_instance(terminal);
+		break;
+	case 1:
+		terminal_copy(terminal, input);
+		break;
+	case 2:
+		terminal_paste(terminal, input);
+		break;
+	case 3:
+		terminal_minimize(terminal);
+		break;
+	}
+}
+
+static void
+show_menu(struct terminal *terminal, struct input *input, uint32_t time)
+{
+	int32_t x, y;
+	static const char *entries[] = {
+		"Open Terminal", "Copy", "Paste", "Minimize"
+	};
+
+	input_get_position(input, &x, &y);
+	window_show_menu(terminal->display, input, time, terminal->window,
+			 x - 10, y - 10, menu_func,
+			 entries, ARRAY_LENGTH(entries));
+}
+
+static void
+click_handler(struct widget *widget, struct terminal *terminal,
+		struct input *input, int32_t x, int32_t y,
+		uint32_t time)
+{
+	if (time - terminal->click_time < 500)
+		terminal->click_count++;
+	else
+		terminal->click_count = 1;
+
+	terminal->click_time = time;
+	terminal->dragging = (terminal->click_count - 1) % 3 + SELECT_CHAR;
+
+	terminal->selection_end_x = terminal->selection_start_x = x;
+	terminal->selection_end_y = terminal->selection_start_y = y;
+	if (recompute_selection(terminal))
+			widget_schedule_redraw(widget);
+}
+
+static void
 button_handler(struct widget *widget,
 	       struct input *input, uint32_t time,
 	       uint32_t button,
 	       enum wl_pointer_button_state state, void *data)
 {
 	struct terminal *terminal = data;
+	int32_t x, y;
 
 	switch (button) {
-	case 272:
+	case BTN_LEFT:
 		if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
-
-			if (time - terminal->button_time < 500)
-				terminal->click_count++;
-			else
-				terminal->click_count = 1;
-
-			terminal->button_time = time;
-			terminal->dragging =
-				(terminal->click_count - 1) % 3 + SELECT_CHAR;
-
-			input_get_position(input,
-					   &terminal->selection_start_x,
-					   &terminal->selection_start_y);
-			terminal->selection_end_x = terminal->selection_start_x;
-			terminal->selection_end_y = terminal->selection_start_y;
-			if (recompute_selection(terminal))
-				widget_schedule_redraw(widget);
+			input_get_position(input, &x, &y);
+			click_handler(widget, terminal, input, x, y, time);
 		} else {
 			terminal->dragging = SELECT_NONE;
 		}
+		break;
+
+	case BTN_RIGHT:
+		if (state == WL_POINTER_BUTTON_STATE_PRESSED)
+			show_menu(terminal, input, time);
 		break;
 	}
 }
@@ -2624,6 +2797,55 @@ motion_handler(struct widget *widget,
 	return CURSOR_IBEAM;
 }
 
+/* This magnitude is chosen rather arbitrarily. Really, the scrolling
+ * should happen on a (fractional) pixel basis, not a line basis. */
+#define AXIS_UNITS_PER_LINE 256
+
+static void
+axis_handler(struct widget *widget,
+	     struct input *input, uint32_t time,
+	     uint32_t axis,
+	     wl_fixed_t value,
+	     void *data)
+{
+	struct terminal *terminal = data;
+	int lines;
+
+	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+		return;
+
+	terminal->smooth_scroll += value;
+	lines = terminal->smooth_scroll / AXIS_UNITS_PER_LINE;
+	terminal->smooth_scroll -= lines * AXIS_UNITS_PER_LINE;
+
+	if (lines > 0) {
+		if (terminal->scrolling) {
+			if ((uint32_t)lines > terminal->saved_start - terminal->start)
+				lines = terminal->saved_start - terminal->start;
+		} else {
+			lines = 0;
+		}
+	} else if (lines < 0) {
+		uint32_t neg_lines = -lines;
+
+		if (neg_lines > terminal->log_size + terminal->start - terminal->end)
+			lines = terminal->end - terminal->log_size - terminal->start;
+	}
+
+	if (lines) {
+		if (!terminal->scrolling)
+			terminal->saved_start = terminal->start;
+		terminal->scrolling = 1;
+
+		terminal->start += lines;
+		terminal->row -= lines;
+		terminal->selection_start_row -= lines;
+		terminal->selection_end_row -= lines;
+
+		widget_schedule_redraw(widget);
+	}
+}
+
 static void
 output_handler(struct window *window, struct output *output, int enter,
 	       void *data)
@@ -2632,6 +2854,43 @@ output_handler(struct window *window, struct output *output, int enter,
 		window_set_buffer_transform(window, output_get_transform(output));
 	window_set_buffer_scale(window, window_get_output_scale(window));
 	window_schedule_redraw(window);
+}
+
+static void
+touch_down_handler(struct widget *widget, struct input *input,
+		uint32_t serial, uint32_t time, int32_t id,
+		float x, float y, void *data)
+{
+	struct terminal *terminal = data;
+
+	if (id == 0)
+		click_handler(widget, terminal, input, x, y, time);
+}
+
+static void
+touch_up_handler(struct widget *widget, struct input *input,
+		uint32_t serial, uint32_t time, int32_t id, void *data)
+{
+	struct terminal *terminal = data;
+
+	if (id == 0)
+		terminal->dragging = SELECT_NONE;
+}
+
+static void
+touch_motion_handler(struct widget *widget, struct input *input,
+		uint32_t time, int32_t id, float x, float y, void *data)
+{
+	struct terminal *terminal = data;
+
+	if (terminal->dragging &&
+		id == 0) {
+		terminal->selection_end_x = (int)x;
+		terminal->selection_end_y = (int)y;
+
+		if (recompute_selection(terminal))
+			widget_schedule_redraw(widget);
+	}
 }
 
 #ifndef howmany
@@ -2652,8 +2911,9 @@ terminal_create(struct display *display)
 	terminal->margin_top = 0;
 	terminal->margin_bottom = -1;
 	terminal->window = window_create(display);
-	terminal->widget = frame_create(terminal->window, terminal);
-	window_set_title(terminal->window, "Wayland Terminal");
+	terminal->widget = window_frame_create(terminal->window, terminal);
+	terminal->title = xstrdup("Wayland Terminal");
+	window_set_title(terminal->window, terminal->title);
 	widget_set_transparent(terminal->widget, 0);
 
 	init_state_machine(&terminal->state_machine);
@@ -2661,6 +2921,8 @@ terminal_create(struct display *display)
 
 	terminal->display = display;
 	terminal->margin = 5;
+	terminal->buffer_height = 1024;
+	terminal->end = 1;
 
 	window_set_user_data(terminal->window, terminal);
 	window_set_key_handler(terminal->window, key_handler);
@@ -2669,6 +2931,7 @@ terminal_create(struct display *display)
 	window_set_fullscreen_handler(terminal->window, fullscreen_handler);
 	window_set_output_handler(terminal->window, output_handler);
 	window_set_close_handler(terminal->window, close_handler);
+	window_set_state_changed_handler(terminal->window, state_changed_handler);
 
 	window_set_data_handler(terminal->window, data_handler);
 	window_set_drop_handler(terminal->window, drop_handler);
@@ -2678,6 +2941,10 @@ terminal_create(struct display *display)
 	widget_set_button_handler(terminal->widget, button_handler);
 	widget_set_enter_handler(terminal->widget, enter_handler);
 	widget_set_motion_handler(terminal->widget, motion_handler);
+	widget_set_axis_handler(terminal->widget, axis_handler);
+	widget_set_touch_up_handler(terminal->widget, touch_up_handler);
+	widget_set_touch_down_handler(terminal->widget, touch_down_handler);
+	widget_set_touch_motion_handler(terminal->widget, touch_motion_handler);
 
 	surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 0, 0);
 	cr = cairo_create(surface);
@@ -2726,6 +2993,7 @@ terminal_destroy(struct terminal *terminal)
 	if (wl_list_empty(&terminal_list))
 		display_exit(terminal->display);
 
+	free(terminal->title);
 	free(terminal);
 }
 
@@ -2774,8 +3042,9 @@ terminal_run(struct terminal *terminal, const char *path)
 	display_watch_fd(terminal->display, terminal->master,
 			 EPOLLIN | EPOLLHUP, &terminal->io_task);
 
-	window_set_fullscreen(terminal->window, option_fullscreen);
-	if (!window_is_fullscreen(terminal->window))
+	if (option_fullscreen)
+		window_set_fullscreen(terminal->window, 1);
+	else
 		terminal_resize(terminal, 80, 24);
 
 	return 0;
@@ -2784,6 +3053,7 @@ terminal_run(struct terminal *terminal, const char *path)
 static const struct weston_option terminal_options[] = {
 	{ WESTON_OPTION_BOOLEAN, "fullscreen", 'f', &option_fullscreen },
 	{ WESTON_OPTION_STRING, "font", 0, &option_font },
+	{ WESTON_OPTION_INTEGER, "font-size", 0, &option_font_size },
 	{ WESTON_OPTION_STRING, "shell", 0, &option_shell },
 };
 
@@ -2791,6 +3061,7 @@ int main(int argc, char *argv[])
 {
 	struct display *d;
 	struct terminal *terminal;
+	const char *config_file;
 	struct weston_config *config;
 	struct weston_config_section *s;
 
@@ -2802,12 +3073,23 @@ int main(int argc, char *argv[])
 	if (!option_shell)
 		option_shell = "/bin/bash";
 
-	config = weston_config_parse("weston.ini");
+	config_file = weston_config_get_name_from_env();
+	config = weston_config_parse(config_file);
 	s = weston_config_get_section(config, "terminal", NULL, NULL);
 	weston_config_section_get_string(s, "font", &option_font, "mono");
 	weston_config_section_get_int(s, "font-size", &option_font_size, 14);
 	weston_config_section_get_string(s, "term", &option_term, "xterm");
 	weston_config_destroy(config);
+
+	if (parse_options(terminal_options,
+			  ARRAY_LENGTH(terminal_options), &argc, argv) > 1) {
+		printf("Usage: %s [OPTIONS]\n"
+		       "  --fullscreen or -f\n"
+		       "  --font=NAME\n"
+		       "  --font-size=SIZE\n"
+		       "  --shell=NAME\n", argv[0]);
+		return 1;
+	}
 
 	d = display_create(&argc, argv);
 	if (d == NULL) {

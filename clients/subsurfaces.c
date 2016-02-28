@@ -3,24 +3,27 @@
  * Copyright © 2011 Benjamin Franzke
  * Copyright © 2012-2013 Collabora, Ltd.
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -36,7 +39,9 @@
 #include <wayland-egl.h>
 #include <GLES2/gl2.h>
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 
+#include "shared/helpers.h"
 #include "window.h"
 
 #if 0
@@ -213,7 +218,9 @@ egl_state_create(struct wl_display *display)
 	egl = calloc(1, sizeof *egl);
 	assert(egl);
 
-	egl->dpy = eglGetDisplay(display);
+	egl->dpy =
+		weston_platform_get_egl_display(EGL_PLATFORM_WAYLAND_KHR,
+						display, NULL);
 	assert(egl->dpy);
 
 	ret = eglInitialize(egl->dpy, &major, &minor);
@@ -254,8 +261,7 @@ egl_make_swapbuffers_nonblock(struct egl_state *egl)
 	if (!eglGetConfigAttrib(egl->dpy, egl->conf, a, &a) ||
 	    !eglGetConfigAttrib(egl->dpy, egl->conf, b, &b)) {
 		fprintf(stderr, "warning: swap interval range unknown\n");
-	} else
-	if (a > 0) {
+	} else if (a > 0) {
 		fprintf(stderr, "warning: minimum swap interval is %d, "
 			"while 0 is required to not deadlock on resize.\n", a);
 	}
@@ -418,9 +424,9 @@ triangle_create_egl_surface(struct triangle *tri, int width, int height)
 
 	tri->wl_surface = widget_get_wl_surface(tri->widget);
 	tri->egl_window = wl_egl_window_create(tri->wl_surface, width, height);
-	tri->egl_surface = eglCreateWindowSurface(tri->egl->dpy,
-						  tri->egl->conf,
-						  tri->egl_window, NULL);
+	tri->egl_surface = weston_platform_create_egl_surface(tri->egl->dpy,
+							      tri->egl->conf,
+							      tri->egl_window, NULL);
 
 	ret = eglMakeCurrent(tri->egl->dpy, tri->egl_surface,
 			     tri->egl_surface, tri->egl->ctx);
@@ -492,12 +498,12 @@ triangle_create(struct window *window, struct egl_state *egl)
 {
 	struct triangle *tri;
 
-	tri = xmalloc(sizeof *tri);
-	memset(tri, 0, sizeof *tri);
+	tri = xzalloc(sizeof *tri);
 
 	tri->egl = egl;
 	tri->widget = window_add_subsurface(window, tri,
 		int_to_mode(option_triangle_mode));
+	widget_set_use_cairo(tri->widget, 0);
 	widget_set_resize_handler(tri->widget, triangle_resize_handler);
 	widget_set_redraw_handler(tri->widget, triangle_redraw_handler);
 
@@ -713,8 +719,7 @@ demoapp_create(struct display *display)
 {
 	struct demoapp *app;
 
-	app = xmalloc(sizeof *app);
-	memset(app, 0, sizeof *app);
+	app = xzalloc(sizeof *app);
 
 	app->egl = egl_state_create(display_get_display(display));
 
@@ -722,7 +727,7 @@ demoapp_create(struct display *display)
 	display_set_user_data(app->display, app);
 
 	app->window = window_create(app->display);
-	app->widget = frame_create(app->window, app);
+	app->widget = window_frame_create(app->window, app);
 	window_set_title(app->window, "Wayland Sub-surface Demo");
 
 	window_set_key_handler(app->window, key_handler);
@@ -772,8 +777,8 @@ main(int argc, char *argv[])
 	struct display *display;
 	struct demoapp *app;
 
-	parse_options(options, ARRAY_LENGTH(options), &argc, argv);
-	if (option_help) {
+	if (parse_options(options, ARRAY_LENGTH(options), &argc, argv) > 1
+	    || option_help) {
 		printf(help_text, argv[0]);
 		return 0;
 	}

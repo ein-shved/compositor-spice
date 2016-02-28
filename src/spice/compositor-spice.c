@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013 Yury Shvedov <shved@lvk.cs.msu.su>
+ * Copyright © 2013-2016 Yury Shvedov <shved@lvk.cs.msu.su>
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -20,6 +20,8 @@
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "config.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -28,14 +30,12 @@
 #include <spice/qxl_dev.h>
 #include <spice/macros.h>
 
-#include "../compositor.h"
-#include "../pixman-renderer.h"
 #include "compositor-spice.h"
 #include "weston_basic_event_loop.h"
 #include "weston_qxl_commands.h"
 
 
-struct spice_server_ops {
+struct spice_backend_config {
     const char* addr;
     int flags;
     int port;
@@ -43,7 +43,7 @@ struct spice_server_ops {
 };
 struct spice_output {
     struct weston_output base;
-    struct spice_compositor *compositor;
+    struct spice_backend *backend;
 
     struct weston_mode mode;
 
@@ -61,16 +61,16 @@ static void
 spice_output_start_repaint_loop(struct weston_output *output_base)
 {
     struct spice_output *output = (struct spice_output*) output_base;
-    struct spice_compositor *c  = output->compositor;
+    struct spice_backend *b  = output->backend;
 
-    c->worker->start(c->worker);
-    c->core->timer_start ( c->primary_output->wakeup_timer, 5);
+    b->worker->start(b->worker);
+    b->core->timer_start ( b->primary_output->wakeup_timer, 5);
 }
-static void
+static int
 spice_output_repaint (struct weston_output *output_base,
         pixman_region32_t *damage)
 {
-    struct spice_compositor *c = (struct spice_compositor *)
+    struct spice_backend *b = (struct spice_backend *)
             output_base->compositor;
     struct spice_output *output = (struct spice_output *) output_base;
 
@@ -79,10 +79,10 @@ spice_output_repaint (struct weston_output *output_base,
     output->base.compositor->renderer->repaint_output (output_base, damage);
 
     if (output->full_image_id == 0) {
-        output->full_image_id = spice_create_image(c);
+        output->full_image_id = spice_create_image(b);
     }
 
-    spice_paint_image (c, output->full_image_id,
+    return spice_paint_image (b, output->full_image_id,
             output_base->x,
             output_base->y,
             output_base->width,
@@ -96,10 +96,10 @@ static void
 spice_output_destroy ( struct weston_output *output_base)
 {
     struct spice_output *output = (struct spice_output*) output_base;
-    struct spice_compositor *c = output->compositor;
+    struct spice_backend *b = output->backend;
 
-    c->core->timer_cancel (output->wakeup_timer);
-    c->core->timer_remove (output->wakeup_timer);
+    b->core->timer_cancel (output->wakeup_timer);
+    b->core->timer_remove (output->wakeup_timer);
 
     free ( pixman_image_get_destroy_data(output->full_image));
     free (output->full_image);
@@ -108,29 +108,27 @@ spice_output_destroy ( struct weston_output *output_base)
 static void
 on_wakeup (void *opaque) {
     struct spice_output *output = opaque;
-    struct spice_compositor *c = output->compositor;
-    uint32_t msec;
-    struct timeval tv;
+    struct spice_backend *b = output->backend;
+	struct timespec ts;
 
-	gettimeofday(&tv, NULL);
-	msec = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+	weston_compositor_read_presentation_clock(b->compositor, &ts);
 
-    c->worker->wakeup(c->worker);
-    c->core->timer_start (output->wakeup_timer, 1);
+    b->worker->wakeup(b->worker);
+    b->core->timer_start (output->wakeup_timer, 1);
 
-    weston_output_finish_frame (&output->base, msec);
+    weston_output_finish_frame (&output->base, &ts, 0);
     weston_output_schedule_repaint (&output->base);
 }
 
 static struct spice_output *
-spice_create_output ( struct spice_compositor *c,
+spice_create_output ( struct spice_backend *b,
         int x, int y,
         int width, int height,
         uint32_t transform )
 {
     struct spice_output *output;
 
-    if (c->core == NULL) {
+    if (b->core == NULL) {
         goto err_core_interface;
     }
     output = malloc (sizeof *output);
@@ -152,13 +150,13 @@ spice_create_output ( struct spice_compositor *c,
     }
 
     output->spice_surface_id =
-        spice_create_primary_surface (c, width, height,
+        spice_create_primary_surface (b, width, height,
             output->surface);
 
-    output->full_image_id = spice_create_image (c);
+    output->full_image_id = spice_create_image (b);
 
     output->has_spice_surface = FALSE;
-    output->compositor = c;
+    output->backend = b;
 	output->mode.flags =
 		WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED;
 	output->mode.width = width;
@@ -180,15 +178,15 @@ spice_create_output ( struct spice_compositor *c,
     output->base.make               = "none";
 	output->base.model              = "none";
 
-    weston_output_init ( &output->base, &c->base,
+    weston_output_init ( &output->base, b->compositor,
                 x, y, width, height, transform, 1 );
     if( pixman_renderer_output_create (&output->base) <0) {
         goto err_pixman_create;
     }
     pixman_renderer_output_set_buffer (&output->base, output->full_image);
-    wl_list_insert(c->base.output_list.prev, &output->base.link);
+    wl_list_insert(b->compositor->output_list.prev, &output->base.link);
 
-    output->wakeup_timer = c->core->timer_add(on_wakeup, output);
+    output->wakeup_timer = b->core->timer_add(on_wakeup, output);
     if (output->wakeup_timer == NULL) {
         goto err_timer;
     }
@@ -212,40 +210,40 @@ err_core_interface:
 }
 
 static void
-weston_spice_server_new ( struct spice_compositor *c,
-        const struct spice_server_ops *ops )
+weston_spice_server_new (struct spice_backend *b,
+        const struct spice_backend_config *config)
 {
     //Init spice server
-    c->spice_server = spice_server_new();
+    b->spice_server = spice_server_new();
 
-    spice_server_set_addr ( c->spice_server,
-                            ops->addr, ops->flags );
-    spice_server_set_port ( c->spice_server,
-                            ops->port );
-    if (ops->no_auth ) {
-        spice_server_set_noauth ( c->spice_server );
+    spice_server_set_addr (b->spice_server,
+                           config->addr, config->flags);
+    spice_server_set_port (b->spice_server,
+                           config->port );
+    if (config->no_auth) {
+        spice_server_set_noauth (b->spice_server);
     }
 
     //TODO set another spice server options here
 
-    spice_server_init (c->spice_server, c->core);
+    spice_server_init (b->spice_server, b->core);
 
     //qxl interface
-    weston_spice_qxl_init (c);
-    spice_server_add_interface (c->spice_server, &c->display_sin.base);
+    weston_spice_qxl_init (b);
+    spice_server_add_interface (b->spice_server, &b->display_sin.base);
 }
 
 static int
-weston_spice_input_init ( struct spice_compositor *c,
-        const struct spice_server_ops *ops )
+weston_spice_input_init (struct spice_backend *b,
+        const struct spice_backend_config *config)
 {
-    weston_seat_init (&c->core_seat, &c->base, "default");
+    weston_seat_init (&b->core_seat, b->compositor, "default");
 
     //mouse interface
-    weston_spice_mouse_init (c);
+    weston_spice_mouse_init (b);
 
     //keyboard interface
-    if ( weston_spice_kbd_init (c) < 0) {
+    if ( weston_spice_kbd_init (b) < 0) {
         return -1;
     }
     return 0;
@@ -254,24 +252,24 @@ weston_spice_input_init ( struct spice_compositor *c,
 static void
 spice_destroy (struct weston_compositor *ec)
 {
-    struct spice_compositor *c = (struct spice_compositor*) ec;
+    struct spice_backend *b = (struct spice_backend*) ec;
 
     weston_compositor_shutdown (ec);
 
     ec->renderer->destroy(ec);
-    c->worker->stop (c->worker);
+    b->worker->stop (b->worker);
 
     /* TODO: after calling next line double free detect.
      * recognize, why?
      */
-    //spice_server_destroy(c->spice_server);
+    //spice_server_destroy(b->spice_server);
 
-    weston_spice_mouse_destroy (c);
-    weston_spice_kbd_destroy (c);
-    weston_spice_qxl_destroy (c);
+    weston_spice_mouse_destroy (b);
+    weston_spice_kbd_destroy (b);
+    weston_spice_qxl_destroy (b);
 
-    free (c->primary_output->surface);
-    free (c->primary_output);
+    free (b->primary_output->surface);
+    free (b->primary_output);
 }
 
 static void
@@ -279,96 +277,92 @@ spice_restore (struct weston_compositor *compositor_base)
 {
 }
 
-static struct spice_compositor *
-spice_compositor_create ( struct wl_display *display,
-        const struct spice_server_ops *ops,
+static struct spice_backend *
+spice_backend_create (struct weston_compositor *compositor,
+        const struct spice_backend_config *config,
         int *argc, char *argv[],
-        struct weston_config *config )
+        struct weston_config *wconfig )
 {
-    struct spice_compositor *c;
+    struct spice_backend *b;
 
-    c = malloc(sizeof *c);
-    if ( c == NULL ) {
-        goto err_malloc_compositor;
+    b = zalloc(sizeof *b);
+    if ( b == NULL ) {
+        return NULL;
     }
-    memset (c, 0, sizeof *c);
 
-    if (weston_compositor_init (&c->base, display, argc, argv, config) < 0)
+    b->compositor = compositor;
+    b->base.destroy = spice_destroy;
+    b->base.restore = spice_restore;
+
+	if (weston_compositor_set_presentation_clock_software(compositor) < 0)
+		goto err_compositor;
+	if (pixman_renderer_init(compositor) < 0)
+		goto err_compositor;
+#if 0
+    if (weston_compositor_init (&b->base, display, argc, argv, config) < 0)
     {
         goto err_weston_init;
     }
+#endif
 
-    c->core = basic_event_loop_init(display);
-    weston_spice_server_new (c, ops);
+	compositor->capabilities |= WESTON_CAP_ARBITRARY_MODES;
 
-    weston_log ("Spice server is up on %s:%d\n", ops->addr, ops->port);
+    b->core = basic_event_loop_init(compositor);
+    weston_spice_server_new (b, config);
 
-    c->base.wl_display = display;
-    if ( pixman_renderer_init (&c->base) < 0) {
-        goto err_init_pixman;
-    }
-    weston_log ("Using %s renderer\n", "pixman");
+    weston_log ("Spice server is up on %s:%d\n", config->addr, config->port);
 
-    c->base.destroy = spice_destroy;
-    c->base.restore = spice_restore;
-
-    if ( weston_spice_input_init(c, ops) < 0) {
+    if (weston_spice_input_init(b, config) < 0) {
         goto err_input_init;
     }
 
-    c->primary_output = spice_create_output ( c,
-                0, 0, //(x,y)
+    b->primary_output = spice_create_output(b, 0, 0, //(x,y)
                 MAX_WIDTH, MAX_HEIGHT, //WIDTH x HEIGTH
-                WL_OUTPUT_TRANSFORM_NORMAL ); //transform
+                WL_OUTPUT_TRANSFORM_NORMAL); //transform
 
-    if (c->primary_output == NULL ) {
+    if (b->primary_output == NULL ) {
         goto err_output;
     }
-
-    return c;
+    compositor->backend = &b->base;
+    return b;
 
 err_output:
 err_input_init:
-err_init_pixman:
-err_weston_init:
-    free (c);
-err_malloc_compositor:
+err_compositor:
+    free (b);
     return NULL;
 }
 
-WL_EXPORT struct weston_compositor *
-backend_init( struct wl_display *display, int *argc, char *argv[],
-        struct weston_config *config)
+WL_EXPORT int
+backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
+        struct weston_config *wconfig,
+        struct weston_backend_config *config_base)
 {
-    struct spice_compositor *c;
-    struct spice_server_ops ops = {
+    struct spice_backend *b;
+    struct spice_backend_config config = {
         .addr = "localhost",
         .port = 5912,
         .flags = 0,
-        .no_auth = TRUE,
+        .no_auth = 1,
     };
 
     const struct weston_option spice_options[] = {
-		{ WESTON_OPTION_STRING,  "host", 0, &ops.addr },
-		{ WESTON_OPTION_INTEGER, "port", 0, &ops.port },
+		{ WESTON_OPTION_STRING,  "host", 0, &config.addr },
+		{ WESTON_OPTION_INTEGER, "port", 0, &config.port },
         //TODO parse auth options here
 	};
 
     parse_options (spice_options, ARRAY_LENGTH (spice_options), argc, argv);
     weston_log ("Initialising spice compositor\n");
-    c = spice_compositor_create ( display, &ops,
-            argc, argv, config);
-    if (c == NULL ) {
-        return NULL;
+    b = spice_backend_create (compositor, &config, argc, argv, wconfig);
+    if (b == NULL ) {
+        return -1;
     }
-
-    dprint (3, "done: %lx", (long unsigned)c);
-
-    return &c->base;
+    return 0;
 }
 
 uint32_t
-spice_get_primary_surface_id (struct spice_compositor *c)
+spice_get_primary_surface_id (struct spice_backend *b)
 {
-    return c->primary_output->spice_surface_id;
+    return b->primary_output->spice_surface_id;
 }

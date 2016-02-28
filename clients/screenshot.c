@@ -1,23 +1,24 @@
 /*
  * Copyright © 2008 Kristian Høgsberg
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include "config.h"
@@ -35,15 +36,15 @@
 #include <cairo.h>
 
 #include <wayland-client.h>
-#include "screenshooter-client-protocol.h"
-#include "../shared/os-compatibility.h"
+#include "weston-screenshooter-client-protocol.h"
+#include "shared/os-compatibility.h"
 
 /* The screenshooter is a good example of a custom object exposed by
  * the compositor and serves as a test bed for implementing client
  * side marshalling outside libwayland.so */
 
 static struct wl_shm *shm;
-static struct screenshooter *screenshooter;
+static struct weston_screenshooter *screenshooter;
 static struct wl_list output_list;
 int min_x, min_y, max_x, max_y;
 int buffer_copy_done;
@@ -117,12 +118,12 @@ static const struct wl_output_listener output_listener = {
 };
 
 static void
-screenshot_done(void *data, struct screenshooter *screenshooter)
+screenshot_done(void *data, struct weston_screenshooter *screenshooter)
 {
 	buffer_copy_done = 1;
 }
 
-static const struct screenshooter_listener screenshooter_listener = {
+static const struct weston_screenshooter_listener screenshooter_listener = {
 	screenshot_done
 };
 
@@ -140,9 +141,10 @@ handle_global(void *data, struct wl_registry *registry,
 		wl_output_add_listener(output->output, &output_listener, output);
 	} else if (strcmp(interface, "wl_shm") == 0) {
 		shm = wl_registry_bind(registry, name, &wl_shm_interface, 1);
-	} else if (strcmp(interface, "screenshooter") == 0) {
+	} else if (strcmp(interface, "weston_screenshooter") == 0) {
 		screenshooter = wl_registry_bind(registry, name,
-						 &screenshooter_interface, 1);
+						 &weston_screenshooter_interface,
+						 1);
 	}
 }
 
@@ -289,7 +291,9 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	screenshooter_add_listener(screenshooter, &screenshooter_listener, screenshooter);
+	weston_screenshooter_add_listener(screenshooter,
+					  &screenshooter_listener,
+					  screenshooter);
 
 	if (set_buffer_size(&width, &height))
 		return -1;
@@ -297,7 +301,9 @@ int main(int argc, char *argv[])
 
 	wl_list_for_each(output, &output_list, link) {
 		output->buffer = create_shm_buffer(output->width, output->height, &output->data);
-		screenshooter_shoot(screenshooter, output->output, output->buffer);
+		weston_screenshooter_shoot(screenshooter,
+					   output->output,
+					   output->buffer);
 		buffer_copy_done = 0;
 		while (!buffer_copy_done)
 			wl_display_roundtrip(display);

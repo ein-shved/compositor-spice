@@ -51,8 +51,7 @@ static long backlight_get(struct backlight *backlight, char *node)
 	long value, ret;
 
 	if (asprintf(&path, "%s/%s", backlight->path, node) < 0)
-		return -ENOMEM
-;
+		return -ENOMEM;
 	fd = open(path, O_RDONLY);
 	if (fd < 0) {
 		ret = -1;
@@ -211,8 +210,10 @@ struct backlight *backlight_init(struct udev_device *drm_device,
 			     entry->d_name) < 0)
 			goto err;
 
-		if (asprintf(&path, "%s/%s", backlight_path, "type") < 0)
+		if (asprintf(&path, "%s/%s", backlight_path, "type") < 0) {
+			free(backlight_path);
 			goto err;
+		}
 
 		fd = open(path, O_RDONLY);
 
@@ -258,7 +259,7 @@ struct backlight *backlight_init(struct udev_device *drm_device,
 
 		parent = basename(buffer);
 
-		/* Perform matching for raw and firmware backlights - 
+		/* Perform matching for raw and firmware backlights -
 		   platform backlights have to be assumed to match */
 		if (entry_type == BACKLIGHT_RAW ||
 		    entry_type == BACKLIGHT_FIRMWARE) {

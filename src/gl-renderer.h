@@ -1,23 +1,26 @@
 /*
  * Copyright © 2012 John Kåre Alsaker
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "config.h"
@@ -27,79 +30,103 @@
 #ifdef ENABLE_EGL
 
 #include <EGL/egl.h>
+#include <EGL/eglext.h>
 
-extern const EGLint gl_renderer_opaque_attribs[];
-extern const EGLint gl_renderer_alpha_attribs[];
-
-int
-gl_renderer_create(struct weston_compositor *ec, EGLNativeDisplayType display,
-	const EGLint *attribs, const EGLint *visual_id);
-EGLDisplay
-gl_renderer_display(struct weston_compositor *ec);
-int
-gl_renderer_output_create(struct weston_output *output,
-				    EGLNativeWindowType window);
-void
-gl_renderer_output_destroy(struct weston_output *output);
-EGLSurface
-gl_renderer_output_surface(struct weston_output *output);
-void
-gl_renderer_set_border(struct weston_compositor *ec, int32_t width, int32_t height, void *data,
-			  int32_t *edges);
-
-void
-gl_renderer_print_egl_error_state(void);
 #else
 
 typedef int EGLint;
+typedef int EGLenum;
 typedef void *EGLDisplay;
 typedef void *EGLSurface;
+typedef void *EGLConfig;
 typedef intptr_t EGLNativeDisplayType;
 typedef intptr_t EGLNativeWindowType;
+#define EGL_DEFAULT_DISPLAY ((EGLNativeDisplayType)0)
 
-static const EGLint gl_renderer_opaque_attribs[];
-static const EGLint gl_renderer_alpha_attribs[];
+#endif /* ENABLE_EGL */
 
-inline static int
-gl_renderer_create(struct weston_compositor *ec, EGLNativeDisplayType display,
-	const EGLint *attribs, const EGLint *visual_id)
-{
-	return -1;
-}
-
-inline static EGLDisplay
-gl_renderer_display(struct weston_compositor *ec)
-{
-	return 0;
-}
-
-inline static int
-gl_renderer_output_create(struct weston_output *output,
-				    EGLNativeWindowType window)
-{
-	return -1;
-}
-
-inline static void
-gl_renderer_output_destroy(struct weston_output *output)
-{
-}
-
-inline static EGLSurface
-gl_renderer_output_surface(struct weston_output *output)
-{
-	return 0;
-}
-
-inline static void
-gl_renderer_set_border(struct weston_compositor *ec, int32_t width, int32_t height, void *data,
-			  int32_t *edges)
-{
-}
-
-inline static void
-gl_renderer_print_egl_error_state(void)
-{
-}
-
+#ifndef EGL_EXT_platform_base
+typedef EGLDisplay (*PFNEGLGETPLATFORMDISPLAYEXTPROC) (EGLenum platform, void *native_display, const EGLint *attrib_list);
+typedef EGLSurface (*PFNEGLCREATEPLATFORMWINDOWSURFACEEXTPROC) (EGLDisplay dpy, EGLConfig config, void *native_window, const EGLint *attrib_list);
 #endif
+
+#ifndef EGL_PLATFORM_GBM_KHR
+#define EGL_PLATFORM_GBM_KHR 0x31D7
+#endif
+
+#ifndef EGL_PLATFORM_WAYLAND_KHR
+#define EGL_PLATFORM_WAYLAND_KHR 0x31D8
+#endif
+
+#ifndef EGL_PLATFORM_X11_KHR
+#define EGL_PLATFORM_X11_KHR 0x31D5
+#endif
+
+#define NO_EGL_PLATFORM 0
+
+enum gl_renderer_border_side {
+	GL_RENDERER_BORDER_TOP = 0,
+	GL_RENDERER_BORDER_LEFT = 1,
+	GL_RENDERER_BORDER_RIGHT = 2,
+	GL_RENDERER_BORDER_BOTTOM = 3,
+};
+
+struct gl_renderer_interface {
+	const EGLint *opaque_attribs;
+	const EGLint *alpha_attribs;
+
+	int (*create)(struct weston_compositor *ec,
+		      EGLenum platform,
+		      void *native_window,
+		      const EGLint *attribs,
+		      const EGLint *visual_id,
+		      const int n_ids);
+
+	EGLDisplay (*display)(struct weston_compositor *ec);
+
+	int (*output_create)(struct weston_output *output,
+			     EGLNativeWindowType window_for_legacy,
+			     void *window_for_platform,
+			     const EGLint *attribs,
+			     const EGLint *visual_id,
+			     const int n_ids);
+
+	void (*output_destroy)(struct weston_output *output);
+
+	EGLSurface (*output_surface)(struct weston_output *output);
+
+	/* Sets the output border.
+	 *
+	 * The side specifies the side for which we are setting the border.
+	 * The width and height are the width and height of the border.
+	 * The tex_width patemeter specifies the width of the actual
+	 * texture; this may be larger than width if the data is not
+	 * tightly packed.
+	 *
+	 * The top and bottom textures will extend over the sides to the
+	 * full width of the bordered window.  The right and left edges,
+	 * however, will extend only to the top and bottom of the
+	 * compositor surface.  This is demonstrated by the picture below:
+	 *
+	 * +-----------------------+
+	 * |          TOP          |
+	 * +-+-------------------+-+
+	 * | |                   | |
+	 * |L|                   |R|
+	 * |E|                   |I|
+	 * |F|                   |G|
+	 * |T|                   |H|
+	 * | |                   |T|
+	 * | |                   | |
+	 * +-+-------------------+-+
+	 * |        BOTTOM         |
+	 * +-----------------------+
+	 */
+	void (*output_set_border)(struct weston_output *output,
+				  enum gl_renderer_border_side side,
+				  int32_t width, int32_t height,
+				  int32_t tex_width, unsigned char *data);
+
+	void (*print_egl_error_state)(void);
+};
+

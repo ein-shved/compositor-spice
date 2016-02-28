@@ -2,23 +2,24 @@
  * Copyright © 2011 Benjamin Franzke
  * Copyright © 2010, 2013 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <config.h>
@@ -38,7 +39,7 @@
 #include <math.h>
 
 #include <wayland-client.h>
-#include "../shared/os-compatibility.h"
+#include "shared/os-compatibility.h"
 
 struct device {
 	enum { KEYBOARD, POINTER } type;
@@ -80,6 +81,20 @@ buffer_release(void *data, struct wl_buffer *buffer)
 static const struct wl_buffer_listener buffer_listener = {
 	buffer_release
 };
+
+static inline void *
+xzalloc(size_t s)
+{
+	void *p;
+
+	p = calloc(1, s);
+	if (p == NULL) {
+		fprintf(stderr, "%s: out of memory\n", program_invocation_short_name);
+		exit(EXIT_FAILURE);
+	}
+
+	return p;
+}
 
 static int
 attach_buffer(struct window *window, int width, int height)
@@ -140,10 +155,7 @@ create_window(struct display *display, int width, int height)
 {
 	struct window *window;
 
-	window = calloc(1, sizeof *window);
-	if (!window)
-		return NULL;
-
+	window = xzalloc(sizeof *window);
 	window->display = display;
 	window->width = width;
 	window->height = height;
@@ -226,12 +238,7 @@ create_display(void)
 {
 	struct display *display;
 
-	display = malloc(sizeof *display);
-	if (display == NULL) {
-		fprintf(stderr, "out of memory\n");
-		exit(1);
-	}
-	memset(display, 0, sizeof *display);
+	display = xzalloc(sizeof *display);
 	display->display = wl_display_connect(NULL);
 	assert(display->display);
 
@@ -251,8 +258,6 @@ create_display(void)
 		fprintf(stderr, "WL_SHM_FORMAT_XRGB32 not available\n");
 		exit(1);
 	}
-
-	wl_display_get_fd(display->display);
 
 	wl_list_init(&display->devices);
 
@@ -452,8 +457,7 @@ create_device(struct display *display, const char *time_desc, int type)
 		goto error;
 	}
 
-	device = malloc(sizeof *device);
-	memset(device, 0, sizeof(*device));
+	device = xzalloc(sizeof *device);
 	device->type = type;
 	device->start_time = start_time;
 	device->end_time = end_time;
@@ -552,8 +556,6 @@ main(int argc, char **argv)
 
 	display = create_display();
 	window = create_window(display, 250, 250);
-	if (!window)
-		return 1;
 
 	for (i = 1; i < argc; i++) {
 		if (!strncmp(argv[i], "-p", 2)) {

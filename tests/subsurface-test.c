@@ -1,30 +1,34 @@
 /*
  * Copyright © 2012 Collabora, Ltd.
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
+#include "config.h"
+
+#include <stdio.h>
 #include <string.h>
 
 #include "weston-test-client-helper.h"
-#include "subsurface-client-protocol.h"
-#include <stdio.h>
 
 #define NUM_SUBSURFACES 3
 
@@ -88,7 +92,7 @@ TEST(test_subsurface_basic_protocol)
 	struct compound_surface com1;
 	struct compound_surface com2;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com1, client);
@@ -103,7 +107,7 @@ TEST(test_subsurface_position_protocol)
 	struct compound_surface com;
 	int i;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com, client);
@@ -119,7 +123,7 @@ TEST(test_subsurface_placement_protocol)
 	struct client *client;
 	struct compound_surface com;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com, client);
@@ -132,13 +136,13 @@ TEST(test_subsurface_placement_protocol)
 	client_roundtrip(client);
 }
 
-FAIL_TEST(test_subsurface_paradox)
+TEST(test_subsurface_paradox)
 {
 	struct client *client;
 	struct wl_surface *parent;
 	struct wl_subcompositor *subco;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	subco = get_subcompositor(client);
@@ -147,15 +151,16 @@ FAIL_TEST(test_subsurface_paradox)
 	/* surface is its own parent */
 	wl_subcompositor_get_subsurface(subco, parent, parent);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subcompositor_interface,
+			      WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_identical_link)
+TEST(test_subsurface_identical_link)
 {
 	struct client *client;
 	struct compound_surface com;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com, client);
@@ -163,16 +168,17 @@ FAIL_TEST(test_subsurface_identical_link)
 	/* surface is already a subsurface */
 	wl_subcompositor_get_subsurface(com.subco, com.child[0], com.parent);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subcompositor_interface,
+			      WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_change_link)
+TEST(test_subsurface_change_link)
 {
 	struct client *client;
 	struct compound_surface com;
 	struct wl_surface *stranger;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	stranger = wl_compositor_create_surface(client->wl_compositor);
@@ -181,7 +187,8 @@ FAIL_TEST(test_subsurface_change_link)
 	/* surface is already a subsurface */
 	wl_subcompositor_get_subsurface(com.subco, com.child[0], stranger);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subcompositor_interface,
+			      WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE);
 }
 
 TEST(test_subsurface_nesting)
@@ -190,7 +197,7 @@ TEST(test_subsurface_nesting)
 	struct compound_surface com;
 	struct wl_surface *stranger;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	stranger = wl_compositor_create_surface(client->wl_compositor);
@@ -208,7 +215,7 @@ TEST(test_subsurface_nesting_parent)
 	struct compound_surface com;
 	struct wl_surface *stranger;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	stranger = wl_compositor_create_surface(client->wl_compositor);
@@ -220,13 +227,13 @@ TEST(test_subsurface_nesting_parent)
 	client_roundtrip(client);
 }
 
-FAIL_TEST(test_subsurface_loop_paradox)
+TEST(test_subsurface_loop_paradox)
 {
 	struct client *client;
 	struct wl_surface *surface[3];
 	struct wl_subcompositor *subco;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	subco = get_subcompositor(client);
@@ -239,16 +246,17 @@ FAIL_TEST(test_subsurface_loop_paradox)
 	wl_subcompositor_get_subsurface(subco, surface[2], surface[1]);
 	wl_subcompositor_get_subsurface(subco, surface[0], surface[2]);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subcompositor_interface,
+			      WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_place_above_stranger)
+TEST(test_subsurface_place_above_stranger)
 {
 	struct client *client;
 	struct compound_surface com;
 	struct wl_surface *stranger;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	stranger = wl_compositor_create_surface(client->wl_compositor);
@@ -257,16 +265,17 @@ FAIL_TEST(test_subsurface_place_above_stranger)
 	/* bad sibling */
 	wl_subsurface_place_above(com.sub[0], stranger);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subsurface_interface,
+			      WL_SUBSURFACE_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_place_below_stranger)
+TEST(test_subsurface_place_below_stranger)
 {
 	struct client *client;
 	struct compound_surface com;
 	struct wl_surface *stranger;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	stranger = wl_compositor_create_surface(client->wl_compositor);
@@ -275,16 +284,17 @@ FAIL_TEST(test_subsurface_place_below_stranger)
 	/* bad sibling */
 	wl_subsurface_place_below(com.sub[0], stranger);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subsurface_interface,
+			      WL_SUBSURFACE_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_place_above_foreign)
+TEST(test_subsurface_place_above_foreign)
 {
 	struct client *client;
 	struct compound_surface com1;
 	struct compound_surface com2;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com1, client);
@@ -293,16 +303,17 @@ FAIL_TEST(test_subsurface_place_above_foreign)
 	/* bad sibling */
 	wl_subsurface_place_above(com1.sub[0], com2.child[0]);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subsurface_interface,
+			      WL_SUBSURFACE_ERROR_BAD_SURFACE);
 }
 
-FAIL_TEST(test_subsurface_place_below_foreign)
+TEST(test_subsurface_place_below_foreign)
 {
 	struct client *client;
 	struct compound_surface com1;
 	struct compound_surface com2;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com1, client);
@@ -311,7 +322,8 @@ FAIL_TEST(test_subsurface_place_below_foreign)
 	/* bad sibling */
 	wl_subsurface_place_below(com1.sub[0], com2.child[0]);
 
-	client_roundtrip(client);
+	expect_protocol_error(client, &wl_subsurface_interface,
+			      WL_SUBSURFACE_ERROR_BAD_SURFACE);
 }
 
 TEST(test_subsurface_destroy_protocol)
@@ -319,7 +331,7 @@ TEST(test_subsurface_destroy_protocol)
 	struct client *client;
 	struct compound_surface com;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	populate_compound_surface(&com, client);
@@ -518,7 +530,7 @@ TEST(test_subsurface_destroy_permutations)
 	int counter = 0;
 	int i;
 
-	client = client_create(100, 50, 123, 77);
+	client = create_client_and_test_surface(100, 50, 123, 77);
 	assert(client);
 
 	permu_init(&per, test_size * 2 - 1);

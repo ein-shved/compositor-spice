@@ -3,24 +3,27 @@
  * Copyright © 2012 Collabora, Ltd.
  * Copyright © 2012 Jonas Ådahl
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -29,11 +32,15 @@
 #include <cairo.h>
 #include <math.h>
 #include <assert.h>
+#include <sys/timerfd.h>
+#include <sys/epoll.h>
+#include <unistd.h>
 
 #include <linux/input.h>
 #include <wayland-client.h>
 
 #include "window.h"
+#include "shared/helpers.h"
 
 struct clickdot {
 	struct display *display;
@@ -52,6 +59,10 @@ struct clickdot {
 	} line;
 
 	int reset;
+
+	struct input *cursor_timeout_input;
+	int cursor_timeout_fd;
+	struct task cursor_timeout_task;
 };
 
 static void
@@ -209,6 +220,19 @@ button_handler(struct widget *widget,
 	widget_schedule_redraw(widget);
 }
 
+static void
+cursor_timeout_reset(struct clickdot *clickdot)
+{
+	const long cursor_timeout = 500;
+	struct itimerspec its;
+
+	its.it_interval.tv_sec = 0;
+	its.it_interval.tv_nsec = 0;
+	its.it_value.tv_sec = cursor_timeout / 1000;
+	its.it_value.tv_nsec = (cursor_timeout % 1000) * 1000 * 1000;
+	timerfd_settime(clickdot->cursor_timeout_fd, 0, &its, NULL);
+}
+
 static int
 motion_handler(struct widget *widget,
 	       struct input *input, uint32_t time,
@@ -220,7 +244,10 @@ motion_handler(struct widget *widget,
 
 	window_schedule_redraw(clickdot->window);
 
-	return CURSOR_LEFT_PTR;
+	cursor_timeout_reset(clickdot);
+	clickdot->cursor_timeout_input = input;
+
+	return CURSOR_BLANK;
 }
 
 static void
@@ -242,6 +269,21 @@ leave_handler(struct widget *widget,
 	clickdot->reset = 1;
 }
 
+static void
+cursor_timeout_func(struct task *task, uint32_t events)
+{
+	struct clickdot *clickdot =
+		container_of(task, struct clickdot, cursor_timeout_task);
+	uint64_t exp;
+
+	if (read(clickdot->cursor_timeout_fd, &exp, sizeof (uint64_t)) !=
+	    sizeof(uint64_t))
+		abort();
+
+	input_set_pointer_image(clickdot->cursor_timeout_input,
+				CURSOR_LEFT_PTR);
+}
+
 static struct clickdot *
 clickdot_create(struct display *display)
 {
@@ -249,7 +291,7 @@ clickdot_create(struct display *display)
 
 	clickdot = xzalloc(sizeof *clickdot);
 	clickdot->window = window_create(display);
-	clickdot->widget = frame_create(clickdot->window, clickdot);
+	clickdot->widget = window_frame_create(clickdot->window, clickdot);
 	window_set_title(clickdot->window, "Wayland ClickDot");
 	clickdot->display = display;
 	clickdot->buffer = NULL;
@@ -274,12 +316,22 @@ clickdot_create(struct display *display)
 	clickdot->line.old_y = -1;
 	clickdot->reset = 0;
 
+	clickdot->cursor_timeout_fd =
+		timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+	clickdot->cursor_timeout_task.run = cursor_timeout_func;
+	display_watch_fd(window_get_display(clickdot->window),
+			 clickdot->cursor_timeout_fd,
+			 EPOLLIN, &clickdot->cursor_timeout_task);
+
 	return clickdot;
 }
 
 static void
 clickdot_destroy(struct clickdot *clickdot)
 {
+	display_unwatch_fd(window_get_display(clickdot->window),
+			   clickdot->cursor_timeout_fd);
+	close(clickdot->cursor_timeout_fd);
 	if (clickdot->buffer)
 		cairo_surface_destroy(clickdot->buffer);
 	widget_destroy(clickdot->widget);

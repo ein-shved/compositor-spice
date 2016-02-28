@@ -1,12 +1,9 @@
+*.log
 *.test
+*.trs
 *.weston
 logs
 matrix-test
 setbacklight
 test-client
 test-text-client
-wayland-test-client-protocol.h
-wayland-test-protocol.c
-wayland-test-server-protocol.h
-subsurface-client-protocol.h
-subsurface-protocol.c

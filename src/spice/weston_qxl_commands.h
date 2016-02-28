@@ -43,15 +43,15 @@
 typedef uint32_t color_t;
 
 uint32_t
-spice_create_primary_surface (struct spice_compositor *c,
+spice_create_primary_surface (struct spice_backend *b,
         int width, int height, uint8_t *data);
 
 uint32_t
-spice_create_image (struct spice_compositor *c);
+spice_create_image (struct spice_backend *b);
 
 int
-spice_paint_image (struct spice_compositor *c, uint32_t image_id,
+spice_paint_image (struct spice_backend *b, uint32_t image_id,
         int x, int y, int width, int wight,
-        intptr_t data, int32_t stride, 
+        intptr_t data, int32_t stride,
         pixman_region32_t *region);
 #endif //WESTON_QXL_COMMANDS_H

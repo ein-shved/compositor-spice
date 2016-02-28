@@ -73,14 +73,14 @@ static void set_release_info(QXLReleaseInfo *info, intptr_t ptr)
 
 static int surfaces_count = 0;
 uint32_t
-spice_create_primary_surface (struct spice_compositor *c,
+spice_create_primary_surface (struct spice_backend *b,
         int width, int height, uint8_t *data)
 {
-    QXLWorker *worker = c->worker;
+    QXLWorker *worker = b->worker;
     QXLDevSurfaceCreate surface;
-    
+
     assert (surfaces_count < NUM_SURFACES );
-    assert (c->worker != NULL);
+    assert (b->worker != NULL);
     assert (width > 0);
     assert (height > 0);
 
@@ -95,12 +95,12 @@ spice_create_primary_surface (struct spice_compositor *c,
     surface.mem        = (uint64_t)data;
     surface.group_id   = MEMSLOT_GROUP;
 
-    c->worker->create_primary_surface(worker, surfaces_count, &surface);
+    b->worker->create_primary_surface(worker, surfaces_count, &surface);
 
     return surfaces_count++;
 }
 static struct surface_create_cmd *
-spice_compositor_create_surface_cmd (int width, int height, 
+spice_backend_create_surface_cmd (int width, int height,
         uint32_t id, uint8_t *data )
 {
     struct surface_create_cmd *surface_cmd;
@@ -131,17 +131,17 @@ err_surface_cmd_malloc:
     weston_log_error("NULL");
 }
 uint8_t *
-spice_compositor_create_surface_empty ( struct spice_compositor *c,
+spice_backend_create_surface_empty ( struct spice_backend *b,
         int width, int height, uint32_t *id )
 {
     uint8_t *surface;
     struct surface_create_cmd *surface_cmd;
-    
+
     if (surfaces_count >= NUM_SURFACES ) {
         weston_log ("WARNING: surface number owerflow\n");
         goto err_surfaces_num;
     }
-    if ( c->push_command == NULL ) {
+    if ( b->push_command == NULL ) {
         weston_log ("ERROR: no push command in spice compositor\n");
         goto err_push_command;
     }
@@ -155,13 +155,13 @@ spice_compositor_create_surface_empty ( struct spice_compositor *c,
     memset (surface, 0, width * height * 4 );
     *id = surfaces_count ++;
 
-    surface_cmd = spice_compositor_create_surface_cmd ( width, 
+    surface_cmd = spice_backend_create_surface_cmd ( width,
                 height, *id, surface);
     if (surface_cmd == NULL) {
         goto err_surface_cmd;
     }
-    c->push_command (c, &surface_cmd->ext);
-   
+    b->push_command (b, &surface_cmd->ext);
+
     return surface;
 
 err_surface_cmd:
@@ -174,7 +174,7 @@ err_max_params:
     return NULL;
 }
 
-static void 
+static void
 fill_clip_data (QXLDrawable *drawable, ClipList *clip_rects)
 {
     if (clip_rects == NULL /*|| clip_rects->num_rects == 0*/) {
@@ -182,7 +182,7 @@ fill_clip_data (QXLDrawable *drawable, ClipList *clip_rects)
     } /*else {
         QXLClipRects *cmd_clip;
 
-        cmd_clip = calloc (sizeof(QXLClipRects) + 
+        cmd_clip = calloc (sizeof(QXLClipRects) +
             clip_rects->num_rects * sizeof(QXLRect), 1);
         cmd_clip->num_rects = clip_rects->num_rects;
         cmd_clip->chunk.data_size = clip_rects->num_rects*sizeof(QXLRect);
@@ -199,8 +199,8 @@ fill_clip_data (QXLDrawable *drawable, ClipList *clip_rects)
 
    //TODO implement
 }
-static int 
-make_drawable (const QXLRect *bbox, uint32_t surface_id, 
+static int
+make_drawable (const QXLRect *bbox, uint32_t surface_id,
         ClipList *clip_rects, intptr_t release_info,
         intptr_t image, QXLDrawable *drawable, uint32_t mm_time)
 {
@@ -208,12 +208,12 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
     uint32_t bw = bbox->right - bbox->left;
     uint32_t bh = bbox->bottom - bbox->top;
     */
-    drawable->surface_id = surface_id; 
+    drawable->surface_id = surface_id;
     drawable->bbox = *bbox;
     //FIXME: Next line is forced nail.
     drawable->mm_time = mm_time - 350;
 
-    fill_clip_data (drawable, clip_rects); 
+    fill_clip_data (drawable, clip_rects);
 
     drawable->effect            = QXL_EFFECT_OPAQUE;
     set_release_info (&drawable->release_info, release_info);
@@ -229,12 +229,12 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
     drawable->u.copy.src_area.right     = clip_rects->extents.x2;
     drawable->u.copy.src_area.bottom    = clip_rects->extents.y2;
 
-    dprint (3, "damage: (%d,%d) (%d,%d) %lx", 
+    dprint (3, "damage: (%d,%d) (%d,%d) %lx",
         clip_rects->extents.x1,
         clip_rects->extents.y1,
         clip_rects->extents.x2,
         clip_rects->extents.y2,
-        (long unsigned) clip_rects->data );       
+        (long unsigned) clip_rects->data );
 
     return 0;
 }
@@ -242,7 +242,7 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
 static uint32_t image_counter = 0;
 
 uint32_t
-spice_create_image (struct spice_compositor *c) 
+spice_create_image (struct spice_backend *b)
 {
     uint32_t image_id;
 
@@ -251,14 +251,14 @@ spice_create_image (struct spice_compositor *c)
 }
 
 int
-spice_paint_image (struct spice_compositor *c, uint32_t image_id,
+spice_paint_image (struct spice_backend *b, uint32_t image_id,
         int x, int y, int width, int height,
         intptr_t data, int32_t stride, pixman_region32_t *damage )
 {
     struct create_image_cmd *cmd;
     QXLImage *image;
     QXLDrawable *drawable;
-    uint32_t surface_id = spice_get_primary_surface_id(c);
+    uint32_t surface_id = spice_get_primary_surface_id(b);
     QXLRect bbox = {
         .left = x,
         .right = x + width,
@@ -274,9 +274,9 @@ spice_paint_image (struct spice_compositor *c, uint32_t image_id,
     image = &cmd->image;
     cmd->base.destructor = release_simple;
 
-    if ( make_drawable (&bbox, surface_id, damage, 
+    if ( make_drawable (&bbox, surface_id, damage,
             (intptr_t) cmd, (intptr_t) image, drawable,
-            c->mm_clock) < 0 )
+            b->mm_clock) < 0 )
     {
         goto err_drawable;
     }
@@ -293,13 +293,13 @@ spice_paint_image (struct spice_compositor *c, uint32_t image_id,
     image->bitmap.stride        = stride;
     image->bitmap.palette       = 0;
     image->bitmap.format        = SPICE_BITMAP_FMT_32BIT;
-    
+
     set_cmd (&cmd->ext, QXL_CMD_DRAW, (intptr_t)drawable);
 
-    c->push_command (c, &cmd->ext);
+    b->push_command (b, &cmd->ext);
 
     return 0;
- 
+
 err_drawable:
     free (cmd);
 err_cmd_malloc:
@@ -307,13 +307,13 @@ err_cmd_malloc:
 }
 
 int //-1 - error
-spice_fill ( struct spice_compositor *c,
+spice_fill ( struct spice_backend *b,
         color_t color, int x, int y, int width, int height )
 {
     struct fill_cmd *cmd;
     QXLDrawable *drawable;
     QXLFill *fill;
-    uint32_t surface_id = spice_get_primary_surface_id (c);
+    uint32_t surface_id = spice_get_primary_surface_id (b);
 
     cmd = calloc (sizeof *cmd, 1);
     if ( cmd == NULL ) {
@@ -322,7 +322,7 @@ spice_fill ( struct spice_compositor *c,
     drawable = &cmd->drawable;
     fill = &drawable->u.fill;
 
-    drawable->surface_id = surface_id; 
+    drawable->surface_id = surface_id;
     drawable->bbox.left = x;
     drawable->bbox.right = x + width;
     drawable->bbox.top = y;
@@ -349,7 +349,7 @@ spice_fill ( struct spice_compositor *c,
 
     set_cmd (&cmd->ext, QXL_CMD_DRAW, (intptr_t)drawable);
 
-    c->push_command (c, &cmd->ext);
+    b->push_command (b, &cmd->ext);
 
     return 0;
 

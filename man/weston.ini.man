@@ -69,15 +69,16 @@ The section headers are:
 .PP
 .RS 4
 .nf
-.BR "core           " "The core modules"
+.BR "core           " "The core modules and options"
+.BR "libinput       " "Input device configuration"
 .BR "shell          " "Desktop customization"
 .BR "launcher       " "Add launcher to the panel"
-.BR "screensaver    " "Screensaver selection"
 .BR "output         " "Output configuration"
 .BR "input-method   " "Onscreen keyboard input"
 .BR "keyboard       " "Keyboard layouts"
 .BR "terminal       " "Terminal application options"
 .BR "xwayland       " "XWayland options"
+.BR "screen-share   " "Screen sharing options"
 .fi
 .RE
 .PP
@@ -90,20 +91,95 @@ be given in decimal (e.g. 123), octal (e.g. 0173), and hexadecimal
 .SH "CORE SECTION"
 The
 .B core
-section is used to select the startup compositor modules.
+section is used to select the startup compositor modules and general options.
 .TP 7
-.BI "modules=" desktop-shell.so,xwayland.so
-specifies the modules to load (string). Available modules in the
+.BI "shell=" desktop-shell.so
+specifies a shell to load (string). This can be used to load your own
+implemented shell or one with Weston as default. Available shells
+in the
 .IR "__weston_modules_dir__"
 directory are:
 .PP
 .RS 10
 .nf
 .BR desktop-shell.so
-.BR tablet-shell.so
-.BR xwayland.so
 .fi
 .RE
+.TP 7
+.BI "modules=" xwayland.so,cms-colord.so
+specifies the modules to load (string). Available modules in the
+.IR "__weston_modules_dir__"
+directory are:
+.PP
+.RS 10
+.nf
+.BR xwayland.so
+.BR cms-colord.so
+.BR screen-share.so
+.fi
+.RE
+.TP 7
+.BI "backend=" headless-backend.so
+overrides defaults backend. Available backend modules in the
+.IR "__weston_modules_dir__"
+directory are:
+.PP
+.RS 10
+.nf
+.BR drm-backend.so
+.BR fbdev-backend.so
+.BR headless-backend.so
+.BR rdp-backend.so
+.BR rpi-backend.so
+.BR wayland-backend.so
+.BR x11-backend.so
+.fi
+.RE
+.TP 7
+.BI "repaint-window=" N
+Set the approximate length of the repaint window in milliseconds. The repaint
+window is used to control and reduce the output latency for clients. If the
+window is longer than the output refresh period, the repaint will be done
+immediately when the previous repaint finishes, not processing client requests
+in between. If the repaint window is too short, the compositor may miss the
+target vertical blank, increasing output latency. The default value is 7
+milliseconds. The allowed range is from -10 to 1000 milliseconds. Using a
+negative value will force the compositor to always miss the target vblank.
+.TP 7
+.BI "gbm-format="format
+sets the GBM format used for the framebuffer for the GBM backend. Can be
+.B xrgb8888,
+.B xrgb2101010,
+.B rgb565.
+By default, xrgb8888 is used.
+.RS
+.PP
+.RE
+.TP 7
+.BI "idle-time="seconds
+sets Weston's idle timeout in seconds. This idle timeout is the time
+after which Weston will enter an "inactive" mode and screen will fade to
+black. A value of 0 disables the timeout.
+
+.IR Important
+: This option may also be set via Weston's '-i' command
+line option and will take precedence over the current .ini option. This
+means that if both weston.ini and command line define this idle-timeout
+time, the one specified in the command-line will be used. On the other
+hand, if none of these sets the value, default idle timeout will be
+set to 300 seconds.
+.RS
+
+.SH "LIBINPUT SECTION"
+The
+.B libinput
+section is used to configure input devices when using the libinput input device
+backend.
+.PP
+Available configuration are:
+.TP 7
+.BI "enable_tap=" true
+enables tap to click on touchpad devices
 .RS
 .PP
 
@@ -114,6 +190,11 @@ section is used to customize the compositor. Some keys may not be handled by
 different shell plugins.
 .PP
 The entries that can appear in this section are:
+.TP 7
+.BI "client=" file
+sets the path for the shell client to run. If not specified
+.I __weston_shell_client__
+is launched (string).
 .TP 7
 .BI "background-image=" file
 sets the path for the background image file (string).
@@ -144,20 +225,48 @@ digit pairs are in order transparency, red, green, and blue. Examples:
 .fi
 .RE
 .TP 7
+.BI "panel-location=" top
+sets the location of the panel (string). Can be
+.B top,
+.B none.
+.TP 7
 .BI "locking=" true
 enables screen locking (boolean).
 .TP 7
 .BI "animation=" zoom
 sets the effect used for opening new windows (string). Can be
 .B zoom,
-.B fade.
-Otherwise, no animation is used.
+.B fade,
+.B none.
+By default, no animation is used.
+.TP 7
+.BI "close-animation=" fade
+sets the effect used when closing windows (string). Can be
+.B fade,
+.B none.
+By default, the fade animation is used.
+.TP 7
+.BI "startup-animation=" fade
+sets the effect used for opening new windows (string). Can be
+.B fade,
+.B none.
+By default, the fade animation is used.
+.TP 7
+.BI "focus-animation=" dim-layer
+sets the effect used with the focused and unfocused windows. Can be
+.B dim-layer,
+.B none.
+By default, no animation is used.
+.TP 7
+.BI "allow-zap=" true
+whether the shell should quit when the Ctrl-Alt-Backspace key combination is
+pressed
 .TP 7
 .BI "binding-modifier=" ctrl
 sets the modifier key used for common bindings (string), such as moving
 surfaces, resizing, rotating, switching, closing and setting the transparency
 for windows, controlling the backlight and zooming the desktop. Possible values:
-ctrl, alt, super (default)
+none, ctrl, alt, super (default)
 .TP 7
 .BI "num-workspaces=" 6
 defines the number of workspaces (unsigned integer). The user can switch
@@ -196,33 +305,14 @@ path=GDK_BACKEND=wayland gnome-terminal --full-screen
 .in
 .fi
 .PP
-.RE
-.SH "SCREENSAVER SECTION"
-The
-.B screensaver
-section is used to select and schedule a screensaver.
-The
-.B screensaver
-section is optional, as are all of the entries that may be specified in
-it.
-.TP 7
-.BI "path=" /usr/libexec/weston-screensaver
-This instructs the compositor to use the selected screensaver client on a given
-path (string). If this line is missing or commented out, the screensaver in
-.B "weston(1)"
-is disabled.
-.RE
-.TP 7
-.BI "duration=" 600
-The idle time in seconds until the screensaver disappears in order to save power
-(unsigned integer).
 .SH "OUTPUT SECTION"
 There can be multiple output sections, each corresponding to one output. It is
 currently only recognized by the drm and x11 backends.
 .TP 7
 .BI "name=" name
 sets a name for the output (string). The backend uses the name to
-identify the output. All X11 output names start with a letter X. The available
+identify the output. All X11 output names start with a letter X.  All
+Wayland output names start with the letters WL.  The available
 output names for DRM backend are listed in the
 .B "weston-launch(1)"
 output.
@@ -233,6 +323,7 @@ Examples of usage:
 .BR "LVDS1    " "DRM backend, Laptop internal panel no.1"
 .BR "VGA1     " "DRM backend, VGA connector no.1"
 .BR "X1       " "X11 backend, X window no.1"
+.BR "WL1      " "Wayland backend, Wayland window no.1"
 .fi
 .RE
 .RS
@@ -290,6 +381,18 @@ be one of the following 8 strings:
 .fi
 .RE
 .TP 7
+.BI "scale=" factor
+An integer, 1 by default, typically configured as 2 when needed, denoting
+the scale factor of the output. Applications that support it render at the
+appropriate scale. For other applications, weston will scale their output
+by this factor.
+.RE
+.RS
+.PP
+Use a value of 2 for outputs with high resolution. Such displays are often
+called "HiDPI" or "retina" displays.
+.RE
+.TP 7
 .BI "seat=" name
 The logical seat name that that this output should be associated with. If this
 is set then the seat's input will be confined to the output that has the seat
@@ -339,12 +442,35 @@ sets the keymap options (string). See the Options section in
 .B "xkeyboard-config(7)."
 .RE
 .RE
+.TP 7
+.BI "repeat-rate=" "40"
+sets the rate of repeating keys in characters per second (unsigned integer)
+.RE
+.RE
+.TP 7
+.BI "repeat-delay=" "400"
+sets the delay in milliseconds since key down until repeating starts (unsigned
+integer)
+.RE
+.RE
+.TP 7
+.BI "numlock-on=" "false"
+sets the default state of the numlock on weston startup for the backends which
+support it.
+.RE
+.RE
+.TP 7
+.BI "vt-switching=" "true"
+Whether to allow the use of Ctrl+Alt+Fn key combinations to switch away from
+the compositor's virtual console.
+.RE
+.RE
 .SH "TERMINAL SECTION"
 Contains settings for the weston terminal application (weston-terminal). It
 allows to customize the font and shell of the command line interface.
 .TP 7
 .BI "font=" "DejaVu Sans Mono"
-sets the font of the terminal (string). For a good experience it is recommend
+sets the font of the terminal (string). For a good experience it is recommended
 to use monospace fonts. In case the font is not found, the default one is used.
 .RE
 .RE
@@ -360,8 +486,15 @@ The terminal shell (string). Sets the $TERM variable.
 .RE
 .SH "XWAYLAND SECTION"
 .TP 7
-.BI "path=" "/usr/bin/Xorg"
+.BI "path=" "/usr/bin/Xwayland"
 sets the path to the xserver to run (string).
+.RE
+.RE
+.SH "SCREEN-SHARE SECTION"
+.TP 7
+.BI "command=" "/usr/bin/weston --backend=rdp-backend.so \
+--shell=fullscreen-shell.so --no-clients-resize"
+sets the command to start a fullscreen-shell server for screen sharing (string).
 .RE
 .RE
 .SH "SEE ALSO"

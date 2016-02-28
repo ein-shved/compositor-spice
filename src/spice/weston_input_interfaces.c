@@ -43,31 +43,31 @@
 struct weston_spice_mouse {
     SpiceMouseInstance sin;
     uint32_t buttons_state;
-    struct spice_compositor *c;
+    struct spice_backend *b;
 };
 
 struct weston_spice_kbd {
     SpiceKbdInstance sin;
-    uint8_t ledstate; 
+    uint8_t ledstate;
     int escape;
-    struct spice_compositor *c;
+    struct spice_backend *b;
 };
 
 static void
-weston_mouse_button_notify (struct spice_compositor *c,
+weston_mouse_button_notify (struct spice_backend *b,
         struct weston_spice_mouse* mouse, uint32_t buttons_state)
 {
     uint32_t buttons = mouse->buttons_state;
     enum wl_pointer_button_state state;
-    
-    dprint(3, "buttons_state: %x, buttons: %x", 
-            buttons_state, buttons);        
+
+    dprint(3, "buttons_state: %x, buttons: %x",
+            buttons_state, buttons);
 #define DELIVER_NOTIFY_BUTTON(mask, btn)\
     if ( !button_equal (buttons, buttons_state, mask ) ) { \
         state = buttons_state & mask ? \
                 WL_POINTER_BUTTON_STATE_PRESSED : \
                 WL_POINTER_BUTTON_STATE_RELEASED; \
-        notify_button (&c->core_seat, weston_compositor_get_time(), \
+        notify_button (&b->core_seat, weston_compositor_get_time(), \
                     btn, state ); \
     }
     DELIVER_NOTIFY_BUTTON( WESTON_SPICE_BTN_LEFT, BTN_LEFT);
@@ -83,37 +83,40 @@ weston_mouse_motion (SpiceMouseInstance *sin, int dx, int dy, int dz,
         uint32_t buttons_state)
 {
     struct weston_spice_mouse *mouse = container_of(sin, struct weston_spice_mouse, sin);
-    struct spice_compositor *c = mouse->c;
+    struct spice_backend *b = mouse->b;
+    struct weston_pointer_axis_event axis_ev = {
+        WL_POINTER_AXIS_VERTICAL_SCROLL,
+        dz*DEFAULT_AXIS_STEP_DISTANCE,
+        0, 0};
+
 
     dprint (3, "called. delta: (%d,%d,%d), buttons: %x",
             dx,dy,dz,buttons_state);
-    /*if (!c->core_seat.has_pointer) {
+    /*if (!b->core_seat.has_pointer) {
         return;
     }
 * look like it depricated
     */
-    notify_motion(&c->core_seat, weston_compositor_get_time(),
-            DEFAULT_MOVEMENT_STEP_DISTANCE*dx, 
+    notify_motion_absolute(&b->core_seat, weston_compositor_get_time(),
+            DEFAULT_MOVEMENT_STEP_DISTANCE*dx,
             DEFAULT_MOVEMENT_STEP_DISTANCE*dy );
     if (dz) {
-        notify_axis (&c->core_seat, weston_compositor_get_time(),
-                WL_POINTER_AXIS_VERTICAL_SCROLL,
-                dz*DEFAULT_AXIS_STEP_DISTANCE );
+        notify_axis (&b->core_seat, weston_compositor_get_time(),
+                     &axis_ev);
     }
-
-    weston_mouse_button_notify (c, mouse, buttons_state);
+    weston_mouse_button_notify (b, mouse, buttons_state);
 }
-static void 
+static void
 weston_mouse_buttons (SpiceMouseInstance *sin, uint32_t buttons_state )
 {
     struct weston_spice_mouse *mouse = container_of(sin, struct weston_spice_mouse, sin);
-    struct spice_compositor *c = mouse->c;
+    struct spice_backend *b = mouse->b;
 
-    /*if (!c->core_seat.has_pointer) {
+    /*if (!b->core_seat.has_pointer) {
         return;
     }*/
     dprint (3, "called. Buttons: %x", buttons_state);
-    weston_mouse_button_notify (c, mouse, buttons_state);
+    weston_mouse_button_notify (b, mouse, buttons_state);
 }
 
 static struct SpiceMouseInterface weston_mouse_interface = {
@@ -127,8 +130,8 @@ static struct SpiceMouseInterface weston_mouse_interface = {
 };
 
 static char *weston_mouse_description = "weston mouse";
-void 
-weston_spice_mouse_init (spice_compositor_t *c)
+void
+weston_spice_mouse_init (spice_backend_t *b)
 {
     static int mouse_count = 0;
     struct weston_spice_mouse *mouse;
@@ -141,19 +144,19 @@ weston_spice_mouse_init (spice_compositor_t *c)
     mouse = calloc (1, sizeof *mouse);
     mouse->sin.base.sif     = &weston_mouse_interface.base;
     mouse->buttons_state    = 0;
-    mouse->c                = c;
+    mouse->b                = b;
 
-    weston_seat_init_pointer (&c->core_seat);
-    spice_server_add_interface (c->spice_server, &mouse->sin.base);
-    c->mouse = mouse;
+    weston_seat_init_pointer (&b->core_seat);
+    spice_server_add_interface (b->spice_server, &mouse->sin.base);
+    b->mouse = mouse;
 }
-void 
-weston_spice_mouse_destroy (spice_compositor_t *c)
+void
+weston_spice_mouse_destroy (spice_backend_t *b)
 {
-    free (c->mouse);
+    free (b->mouse);
 }
 
-//from xf86-video-qxl/src/spiceqxl_inputs.c
+//from xf86-video-qxl/src/spiceqxl_inputs.b
 static uint8_t escaped_map[256] = {
     [0x1c] = 104, //KEY_KP_Enter,
     [0x1d] = 105, //KEY_RCtrl,
@@ -181,14 +184,14 @@ static uint8_t escaped_map[256] = {
 # define MIN_KEYCODE 0;
 #endif //MIN_KEYCODE
 
-static void 
-weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag) 
+static void
+weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
 {
     struct weston_spice_kbd *kbd = container_of(sin, struct weston_spice_kbd, sin);
-    struct spice_compositor *c = kbd->c;
+    struct spice_backend *b = kbd->b;
     enum wl_keyboard_key_state state;
-    
-    /*if (!c->core_seat.has_pointer) {
+
+    /*if (!b->core_seat.has_pointer) {
         return;
     }*/
     if (frag == 224) {
@@ -196,7 +199,7 @@ weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
         kbd->escape = frag;
         return;
     }
-    state = frag & 0x80 ? WL_KEYBOARD_KEY_STATE_RELEASED : 
+    state = frag & 0x80 ? WL_KEYBOARD_KEY_STATE_RELEASED :
         WL_KEYBOARD_KEY_STATE_PRESSED;
     frag = frag & 0x7f;
     if (kbd->escape == 224) {
@@ -211,17 +214,18 @@ weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
 
     dprint (3, "called: %x", frag);
 
-    notify_key (&c->core_seat, weston_compositor_get_time(), frag,
+    notify_key (&b->core_seat, weston_compositor_get_time(), frag,
                     state, STATE_UPDATE_AUTOMATIC );
 }
-static uint8_t 
-weston_kbd_get_leds (SpiceKbdInstance *sin) 
+static uint8_t
+weston_kbd_get_leds (SpiceKbdInstance *sin)
 {
-    struct weston_spice_kbd *kbd = container_of(sin, struct weston_spice_kbd, sin);
-    struct spice_compositor *c = kbd->c;
+#if 0
+    struct weston_spice_kbd *kbd = wl_container_of(sin, kbd, sin);
+    struct spice_backend *b = kbd->b;
 
     //TODO implement
-
+#endif
     return 0;
 }
 static struct SpiceKbdInterface weston_kbd_interface = {
@@ -234,7 +238,7 @@ static struct SpiceKbdInterface weston_kbd_interface = {
     .get_leds           = weston_kbd_get_leds,
 };
 int
-weston_spice_kbd_init (spice_compositor_t *c)
+weston_spice_kbd_init (spice_backend_t *b)
 {
     static int kbd_count = 0;
     struct weston_spice_kbd *kbd;
@@ -247,20 +251,20 @@ weston_spice_kbd_init (spice_compositor_t *c)
     kbd = calloc (1, sizeof *kbd);
     kbd->sin.base.sif = &weston_kbd_interface.base;
     kbd->sin.st       = (SpiceKbdState*) kbd;
-    kbd->c            = c;
+    kbd->b            = b;
 
-    if ( weston_seat_init_keyboard (&c->core_seat, NULL) < 0 ) {
+    if ( weston_seat_init_keyboard (&b->core_seat, NULL) < 0 ) {
         dprint (1, "failed to init seat keyboard");
         return -1;
     }
-    spice_server_add_interface (c->spice_server, &kbd->sin.base);
+    spice_server_add_interface (b->spice_server, &kbd->sin.base);
 
-    c->kbd = kbd;
+    b->kbd = kbd;
 
     return 0;
 }
 void
-weston_spice_kbd_destroy (spice_compositor_t *c)
+weston_spice_kbd_destroy (spice_backend_t *b)
 {
-    free (c->kbd);
+    free (b->kbd);
 }

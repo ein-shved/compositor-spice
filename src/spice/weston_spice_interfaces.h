@@ -29,18 +29,18 @@ struct spice_release_info {
     void (*destructor) (struct spice_release_info *);
 };
 
-typedef struct spice_compositor spice_compositor_t;
+typedef struct spice_backend spice_backend_t;
 typedef struct weston_spice_mouse weston_spice_mouse_t;
 typedef struct weston_spice_kbd weston_spice_kbd_t;
 typedef struct weston_spice_qxl weston_spice_qxl_t;
 
-void weston_spice_qxl_init (spice_compositor_t *qxl);
-void weston_spice_mouse_init (spice_compositor_t *c);
-int weston_spice_kbd_init (spice_compositor_t *c);
+void weston_spice_qxl_init (spice_backend_t *qxl);
+void weston_spice_mouse_init (spice_backend_t *c);
+int weston_spice_kbd_init (spice_backend_t *c);
 
-void weston_spice_qxl_destroy (spice_compositor_t *c);
-void weston_spice_mouse_destroy (spice_compositor_t *c);
-void weston_spice_kbd_destroy (spice_compositor_t *c);
+void weston_spice_qxl_destroy (spice_backend_t *c);
+void weston_spice_mouse_destroy (spice_backend_t *c);
+void weston_spice_kbd_destroy (spice_backend_t *c);
 
 void release_simple (struct spice_release_info *);
 

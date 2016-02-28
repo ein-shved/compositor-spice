@@ -4,23 +4,26 @@
  * Copyright © 2012 Raspberry Pi Foundation
  * Copyright © 2013 Philip Withnall
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "config.h"
@@ -39,14 +42,17 @@
 
 #include <libudev.h>
 
+#include "shared/helpers.h"
 #include "compositor.h"
 #include "launcher-util.h"
 #include "pixman-renderer.h"
-#include "udev-seat.h"
+#include "libinput-seat.h"
 #include "gl-renderer.h"
+#include "presentation_timing-server-protocol.h"
 
-struct fbdev_compositor {
-	struct weston_compositor base;
+struct fbdev_backend {
+	struct weston_backend base;
+	struct weston_compositor *compositor;
 	uint32_t prev_state;
 
 	struct udev *udev;
@@ -71,7 +77,7 @@ struct fbdev_screeninfo {
 };
 
 struct fbdev_output {
-	struct fbdev_compositor *compositor;
+	struct fbdev_backend *backend;
 	struct weston_output base;
 
 	struct weston_mode mode;
@@ -84,8 +90,6 @@ struct fbdev_output {
 
 	/* pixman details. */
 	pixman_image_t *hw_surface;
-	pixman_image_t *shadow_surface;
-	void *shadow_buf;
 	uint8_t depth;
 };
 
@@ -95,6 +99,8 @@ struct fbdev_parameters {
 	int use_gl;
 };
 
+struct gl_renderer_interface *gl_renderer;
+
 static const char default_seat[] = "seat0";
 
 static inline struct fbdev_output *
@@ -103,21 +109,19 @@ to_fbdev_output(struct weston_output *base)
 	return container_of(base, struct fbdev_output, base);
 }
 
-static inline struct fbdev_compositor *
-to_fbdev_compositor(struct weston_compositor *base)
+static inline struct fbdev_backend *
+to_fbdev_backend(struct weston_compositor *base)
 {
-	return container_of(base, struct fbdev_compositor, base);
+	return container_of(base->backend, struct fbdev_backend, base);
 }
 
 static void
 fbdev_output_start_repaint_loop(struct weston_output *output)
 {
-	uint32_t msec;
-	struct timeval tv;
+	struct timespec ts;
 
-	gettimeofday(&tv, NULL);
-	msec = tv.tv_sec * 1000 + tv.tv_usec / 1000;
-	weston_output_finish_frame(output, msec);
+	weston_compositor_read_presentation_clock(output->compositor, &ts);
+	weston_output_finish_frame(output, &ts, PRESENTATION_FEEDBACK_INVALID);
 }
 
 static void
@@ -125,59 +129,10 @@ fbdev_output_repaint_pixman(struct weston_output *base, pixman_region32_t *damag
 {
 	struct fbdev_output *output = to_fbdev_output(base);
 	struct weston_compositor *ec = output->base.compositor;
-	pixman_box32_t *rects;
-	int nrects, i, src_x, src_y, x1, y1, x2, y2, width, height;
 
 	/* Repaint the damaged region onto the back buffer. */
-	pixman_renderer_output_set_buffer(base, output->shadow_surface);
+	pixman_renderer_output_set_buffer(base, output->hw_surface);
 	ec->renderer->repaint_output(base, damage);
-
-	/* Transform and composite onto the frame buffer. */
-	width = pixman_image_get_width(output->shadow_surface);
-	height = pixman_image_get_height(output->shadow_surface);
-	rects = pixman_region32_rectangles(damage, &nrects);
-
-	for (i = 0; i < nrects; i++) {
-		switch (base->transform) {
-		default:
-		case WL_OUTPUT_TRANSFORM_NORMAL:
-			x1 = rects[i].x1;
-			x2 = rects[i].x2;
-			y1 = rects[i].y1;
-			y2 = rects[i].y2;
-			break;
-		case WL_OUTPUT_TRANSFORM_180:
-			x1 = width - rects[i].x2;
-			x2 = width - rects[i].x1;
-			y1 = height - rects[i].y2;
-			y2 = height - rects[i].y1;
-			break;
-		case WL_OUTPUT_TRANSFORM_90:
-			x1 = height - rects[i].y2;
-			x2 = height - rects[i].y1;
-			y1 = rects[i].x1;
-			y2 = rects[i].x2;
-			break;
-		case WL_OUTPUT_TRANSFORM_270:
-			x1 = rects[i].y1;
-			x2 = rects[i].y2;
-			y1 = width - rects[i].x2;
-			y2 = width - rects[i].x1;
-			break;
-		}
-		src_x = x1;
-		src_y = y1;
-
-		pixman_image_composite32(PIXMAN_OP_SRC,
-			output->shadow_surface, /* src */
-			NULL /* mask */,
-			output->hw_surface, /* dest */
-			src_x, src_y, /* src_x, src_y */
-			0, 0, /* mask_x, mask_y */
-			x1, y1, /* dest_x, dest_y */
-			x2 - x1, /* width */
-			y2 - y1 /* height */);
-	}
 
 	/* Update the damage region. */
 	pixman_region32_subtract(&ec->primary_plane.damage,
@@ -194,14 +149,14 @@ fbdev_output_repaint_pixman(struct weston_output *base, pixman_region32_t *damag
 	                             1000000 / output->mode.refresh);
 }
 
-static void
+static int
 fbdev_output_repaint(struct weston_output *base, pixman_region32_t *damage)
 {
 	struct fbdev_output *output = to_fbdev_output(base);
-	struct fbdev_compositor *fbc = output->compositor;
-	struct weston_compositor *ec = & fbc->base;
+	struct fbdev_backend *fbb = output->backend;
+	struct weston_compositor *ec = fbb->compositor;
 
-	if (fbc->use_pixman) {
+	if (fbb->use_pixman) {
 		fbdev_output_repaint_pixman(base,damage);
 	} else {
 		ec->renderer->repaint_output(base, damage);
@@ -212,14 +167,18 @@ fbdev_output_repaint(struct weston_output *base, pixman_region32_t *damage)
 		wl_event_source_timer_update(output->finish_frame_timer,
 	                             1000000 / output->mode.refresh);
 	}
+
+	return 0;
 }
 
 static int
 finish_frame_handler(void *data)
 {
 	struct fbdev_output *output = data;
+	struct timespec ts;
 
-	fbdev_output_start_repaint_loop(&output->base);
+	weston_compositor_read_presentation_clock(output->base.compositor, &ts);
+	weston_output_finish_frame(&output->base, &ts, 0);
 
 	return 1;
 }
@@ -348,7 +307,8 @@ fbdev_query_screen_info(struct fbdev_output *output, int fd,
 
 	info->buffer_length = fixinfo.smem_len;
 	info->line_length = fixinfo.line_length;
-	strncpy(info->id, fixinfo.id, sizeof(info->id) / sizeof(*info->id));
+	strncpy(info->id, fixinfo.id, sizeof(info->id));
+	info->id[sizeof(info->id)-1] = '\0';
 
 	info->pixel_format = calculate_pixman_format(&varinfo, &fixinfo);
 	info->refresh_rate = calculate_refresh_rate(&varinfo);
@@ -493,24 +453,23 @@ static void fbdev_output_destroy(struct weston_output *base);
 static void fbdev_output_disable(struct weston_output *base);
 
 static int
-fbdev_output_create(struct fbdev_compositor *compositor,
+fbdev_output_create(struct fbdev_backend *backend,
                     const char *device)
 {
 	struct fbdev_output *output;
-	pixman_transform_t transform;
+	struct weston_config_section *section;
 	int fb_fd;
-	int shadow_width, shadow_height;
-	int width, height;
-	unsigned int bytes_per_pixel;
 	struct wl_event_loop *loop;
+	uint32_t config_transform;
+	char *s;
 
 	weston_log("Creating fbdev output.\n");
 
-	output = calloc(1, sizeof *output);
-	if (!output)
+	output = zalloc(sizeof *output);
+	if (output == NULL)
 		return -1;
 
-	output->compositor = compositor;
+	output->backend = backend;
 	output->device = device;
 
 	/* Create the frame buffer. */
@@ -519,20 +478,18 @@ fbdev_output_create(struct fbdev_compositor *compositor,
 		weston_log("Creating frame buffer failed.\n");
 		goto out_free;
 	}
-	if (compositor->use_pixman) {
+	if (backend->use_pixman) {
 		if (fbdev_frame_buffer_map(output, fb_fd) < 0) {
 			weston_log("Mapping frame buffer failed.\n");
 			goto out_free;
 		}
+	} else {
+		close(fb_fd);
 	}
 
 	output->base.start_repaint_loop = fbdev_output_start_repaint_loop;
 	output->base.repaint = fbdev_output_repaint;
 	output->base.destroy = fbdev_output_destroy;
-	output->base.assign_planes = NULL;
-	output->base.set_backlight = NULL;
-	output->base.set_dpms = NULL;
-	output->base.switch_mode = NULL;
 
 	/* only one static mode in list */
 	output->mode.flags =
@@ -547,93 +504,42 @@ fbdev_output_create(struct fbdev_compositor *compositor,
 	output->base.subpixel = WL_OUTPUT_SUBPIXEL_UNKNOWN;
 	output->base.make = "unknown";
 	output->base.model = output->fb_info.id;
+	output->base.name = strdup("fbdev");
 
-	weston_output_init(&output->base, &compositor->base,
+	section = weston_config_get_section(backend->compositor->config,
+					    "output", "name",
+					    output->base.name);
+	weston_config_section_get_string(section, "transform", &s, "normal");
+	if (weston_parse_transform(s, &config_transform) < 0)
+		weston_log("Invalid transform \"%s\" for output %s\n",
+			   s, output->base.name);
+	free(s);
+
+	weston_output_init(&output->base, backend->compositor,
 	                   0, 0, output->fb_info.width_mm,
 	                   output->fb_info.height_mm,
-	                   WL_OUTPUT_TRANSFORM_NORMAL,
+	                   config_transform,
 			   1);
 
-	width = output->fb_info.x_resolution;
-	height = output->fb_info.y_resolution;
-
-	pixman_transform_init_identity(&transform);
-	switch (output->base.transform) {
-	default:
-	case WL_OUTPUT_TRANSFORM_NORMAL:
-		shadow_width = width;
-		shadow_height = height;
-		pixman_transform_rotate(&transform,
-			NULL, 0, 0);
-		pixman_transform_translate(&transform, NULL,
-			0, 0);
-		break;
-	case WL_OUTPUT_TRANSFORM_180:
-		shadow_width = width;
-		shadow_height = height;
-		pixman_transform_rotate(&transform,
-			NULL, -pixman_fixed_1, 0);
-		pixman_transform_translate(NULL, &transform,
-			pixman_int_to_fixed(shadow_width),
-			pixman_int_to_fixed(shadow_height));
-		break;
-	case WL_OUTPUT_TRANSFORM_270:
-		shadow_width = height;
-		shadow_height = width;
-		pixman_transform_rotate(&transform,
-			NULL, 0, pixman_fixed_1);
-		pixman_transform_translate(&transform,
-			NULL,
-			pixman_int_to_fixed(shadow_width),
-			0);
-		break;
-	case WL_OUTPUT_TRANSFORM_90:
-		shadow_width = height;
-		shadow_height = width;
-		pixman_transform_rotate(&transform,
-			NULL, 0, -pixman_fixed_1);
-		pixman_transform_translate(&transform,
-			NULL,
-			0,
-			pixman_int_to_fixed(shadow_height));
-		break;
-	}
-
-	bytes_per_pixel = output->fb_info.bits_per_pixel / 8;
-
-	output->shadow_buf = malloc(width * height * bytes_per_pixel);
-	output->shadow_surface =
-		pixman_image_create_bits(output->fb_info.pixel_format,
-		                         shadow_width, shadow_height,
-		                         output->shadow_buf,
-		                         shadow_width * bytes_per_pixel);
-	if (output->shadow_buf == NULL || output->shadow_surface == NULL) {
-		weston_log("Failed to create surface for frame buffer.\n");
-		goto out_hw_surface;
-	}
-
-	/* No need in transform for normal output */
-	if (output->base.transform != WL_OUTPUT_TRANSFORM_NORMAL)
-		pixman_image_set_transform(output->shadow_surface, &transform);
-
-	if (compositor->use_pixman) {
+	if (backend->use_pixman) {
 		if (pixman_renderer_output_create(&output->base) < 0)
-			goto out_shadow_surface;
+			goto out_hw_surface;
 	} else {
 		setenv("HYBRIS_EGLPLATFORM", "wayland", 1);
-		if (gl_renderer_output_create(&output->base,
-					(EGLNativeWindowType)NULL) < 0) {
+		if (gl_renderer->output_create(&output->base,
+					       (EGLNativeWindowType)NULL, NULL,
+					       gl_renderer->opaque_attribs,
+					       NULL, 0) < 0) {
 			weston_log("gl_renderer_output_create failed.\n");
-			goto out_shadow_surface;
+			goto out_hw_surface;
 		}
 	}
 
-
-	loop = wl_display_get_event_loop(compositor->base.wl_display);
+	loop = wl_display_get_event_loop(backend->compositor->wl_display);
 	output->finish_frame_timer =
 		wl_event_loop_add_timer(loop, finish_frame_handler, output);
 
-	wl_list_insert(compositor->base.output_list.prev, &output->base.link);
+	weston_compositor_add_output(backend->compositor, &output->base);
 
 	weston_log("fbdev output %d×%d px\n",
 	           output->mode.width, output->mode.height);
@@ -642,11 +548,7 @@ fbdev_output_create(struct fbdev_compositor *compositor,
 
 	return 0;
 
-out_shadow_surface:
-	pixman_image_unref(output->shadow_surface);
-	output->shadow_surface = NULL;
 out_hw_surface:
-	free(output->shadow_buf);
 	pixman_image_unref(output->hw_surface);
 	output->hw_surface = NULL;
 	weston_output_destroy(&output->base);
@@ -661,32 +563,21 @@ static void
 fbdev_output_destroy(struct weston_output *base)
 {
 	struct fbdev_output *output = to_fbdev_output(base);
-	struct fbdev_compositor *compositor = output->compositor;
+	struct fbdev_backend *backend = output->backend;
 
 	weston_log("Destroying fbdev output.\n");
 
 	/* Close the frame buffer. */
 	fbdev_output_disable(base);
 
-	if (compositor->use_pixman) {
+	if (backend->use_pixman) {
 		if (base->renderer_state != NULL)
 			pixman_renderer_output_destroy(base);
-
-		if (output->shadow_surface != NULL) {
-			pixman_image_unref(output->shadow_surface);
-			output->shadow_surface = NULL;
-		}
-
-		if (output->shadow_buf != NULL) {
-			free(output->shadow_buf);
-			output->shadow_buf = NULL;
-		}
 	} else {
-		gl_renderer_output_destroy(base);
+		gl_renderer->output_destroy(base);
 	}
 
 	/* Remove the output. */
-	wl_list_remove(&output->base.link);
 	weston_output_destroy(&output->base);
 
 	free(output);
@@ -710,7 +601,7 @@ compare_screen_info (const struct fbdev_screeninfo *a,
 }
 
 static int
-fbdev_output_reenable(struct fbdev_compositor *compositor,
+fbdev_output_reenable(struct fbdev_backend *backend,
                       struct weston_output *base)
 {
 	struct fbdev_output *output = to_fbdev_output(base);
@@ -745,13 +636,13 @@ fbdev_output_reenable(struct fbdev_compositor *compositor,
 		 * are re-initialised. */
 		device = output->device;
 		fbdev_output_destroy(base);
-		fbdev_output_create(compositor, device);
+		fbdev_output_create(backend, device);
 
 		return 0;
 	}
 
 	/* Map the device if it has the same details as before. */
-	if (compositor->use_pixman) {
+	if (backend->use_pixman) {
 		if (fbdev_frame_buffer_map(output, fb_fd) < 0) {
 			weston_log("Mapping frame buffer failed.\n");
 			goto err;
@@ -771,11 +662,11 @@ static void
 fbdev_output_disable(struct weston_output *base)
 {
 	struct fbdev_output *output = to_fbdev_output(base);
-	struct fbdev_compositor *compositor = output->compositor;
+	struct fbdev_backend *backend = output->backend;
 
 	weston_log("Disabling fbdev output.\n");
 
-	if ( ! compositor->use_pixman) return;
+	if ( ! backend->use_pixman) return;
 
 	if (output->hw_surface != NULL) {
 		pixman_image_unref(output->hw_surface);
@@ -786,64 +677,62 @@ fbdev_output_disable(struct weston_output *base)
 }
 
 static void
-fbdev_compositor_destroy(struct weston_compositor *base)
+fbdev_backend_destroy(struct weston_compositor *base)
 {
-	struct fbdev_compositor *compositor = to_fbdev_compositor(base);
+	struct fbdev_backend *backend = to_fbdev_backend(base);
 
-	udev_input_destroy(&compositor->input);
+	udev_input_destroy(&backend->input);
 
 	/* Destroy the output. */
-	weston_compositor_shutdown(&compositor->base);
+	weston_compositor_shutdown(base);
 
 	/* Chain up. */
-	compositor->base.renderer->destroy(&compositor->base);
-	weston_launcher_destroy(compositor->base.launcher);
+	weston_launcher_destroy(base->launcher);
 
-	free(compositor);
+	free(backend);
 }
 
 static void
 session_notify(struct wl_listener *listener, void *data)
 {
-	struct fbdev_compositor *compositor = data;
+	struct weston_compositor *compositor = data;
+	struct fbdev_backend *backend = to_fbdev_backend(compositor);
 	struct weston_output *output;
 
-	if (compositor->base.session_active) {
+	if (compositor->session_active) {
 		weston_log("entering VT\n");
-		compositor->base.focus = 1;
-		compositor->base.state = compositor->prev_state;
+		compositor->state = backend->prev_state;
 
-		wl_list_for_each(output, &compositor->base.output_list, link) {
-			fbdev_output_reenable(compositor, output);
+		wl_list_for_each(output, &compositor->output_list, link) {
+			fbdev_output_reenable(backend, output);
 		}
 
-		weston_compositor_damage_all(&compositor->base);
+		weston_compositor_damage_all(compositor);
 
-		udev_input_enable(&compositor->input, compositor->udev);
+		udev_input_enable(&backend->input);
 	} else {
 		weston_log("leaving VT\n");
-		udev_input_disable(&compositor->input);
+		udev_input_disable(&backend->input);
 
-		wl_list_for_each(output, &compositor->base.output_list, link) {
+		wl_list_for_each(output, &compositor->output_list, link) {
 			fbdev_output_disable(output);
 		}
 
-		compositor->base.focus = 0;
-		compositor->prev_state = compositor->base.state;
-		weston_compositor_offscreen(&compositor->base);
+		backend->prev_state = compositor->state;
+		weston_compositor_offscreen(compositor);
 
 		/* If we have a repaint scheduled (from the idle handler), make
 		 * sure we cancel that so we don't try to pageflip when we're
 		 * vt switched away.  The OFFSCREEN state will prevent
-		 * further attemps at repainting.  When we switch
+		 * further attempts at repainting.  When we switch
 		 * back, we schedule a repaint, which will process
 		 * pending frame callbacks. */
 
 		wl_list_for_each(output,
-				 &compositor->base.output_list, link) {
+				 &compositor->output_list, link) {
 			output->repaint_needed = 0;
 		}
-	};
+	}
 }
 
 static void
@@ -852,109 +741,98 @@ fbdev_restore(struct weston_compositor *compositor)
 	weston_launcher_restore(compositor->launcher);
 }
 
-static void
-switch_vt_binding(struct weston_seat *seat, uint32_t time, uint32_t key, void *data)
+static struct fbdev_backend *
+fbdev_backend_create(struct weston_compositor *compositor, int *argc, char *argv[],
+                     struct weston_config *config,
+                     struct fbdev_parameters *param)
 {
-	struct weston_compositor *compositor = data;
-
-	weston_launcher_activate_vt(compositor->launcher, key - KEY_F1 + 1);
-}
-
-static struct weston_compositor *
-fbdev_compositor_create(struct wl_display *display, int *argc, char *argv[],
-                        struct weston_config *config,
-			struct fbdev_parameters *param)
-{
-	struct fbdev_compositor *compositor;
+	struct fbdev_backend *backend;
 	const char *seat_id = default_seat;
-	uint32_t key;
 
 	weston_log("initializing fbdev backend\n");
 
-	compositor = calloc(1, sizeof *compositor);
-	if (compositor == NULL)
+	backend = zalloc(sizeof *backend);
+	if (backend == NULL)
 		return NULL;
 
-	if (weston_compositor_init(&compositor->base, display, argc, argv,
-	                           config) < 0)
-		goto out_free;
-
-	/* Check if we run fbdev-backend using weston-launch */
-	compositor->base.launcher = weston_launcher_connect(&compositor->base);
-	if (compositor->base.launcher == NULL && geteuid() != 0) {
-		weston_log("fatal: fbdev backend should be run "
-			   "using weston-launch binary or as root\n");
+	backend->compositor = compositor;
+	if (weston_compositor_set_presentation_clock_software(
+							compositor) < 0)
 		goto out_compositor;
-	}
 
-	compositor->udev = udev_new();
-	if (compositor->udev == NULL) {
+	backend->udev = udev_new();
+	if (backend->udev == NULL) {
 		weston_log("Failed to initialize udev context.\n");
 		goto out_compositor;
 	}
 
 	/* Set up the TTY. */
-	compositor->session_listener.notify = session_notify;
-	wl_signal_add(&compositor->base.session_signal,
-		      &compositor->session_listener);
-	compositor->base.launcher = weston_launcher_connect(&compositor->base);
-	if (!compositor->base.launcher) {
-		weston_log("Failed to set up launcher.\n");
+	backend->session_listener.notify = session_notify;
+	wl_signal_add(&compositor->session_signal,
+		      &backend->session_listener);
+	compositor->launcher =
+		weston_launcher_connect(compositor, param->tty, "seat0", false);
+	if (!compositor->launcher) {
+		weston_log("fatal: fbdev backend should be run "
+			   "using weston-launch binary or as root\n");
 		goto out_udev;
 	}
 
-	compositor->base.destroy = fbdev_compositor_destroy;
-	compositor->base.restore = fbdev_restore;
+	backend->base.destroy = fbdev_backend_destroy;
+	backend->base.restore = fbdev_restore;
 
-	compositor->base.focus = 1;
-	compositor->prev_state = WESTON_COMPOSITOR_ACTIVE;
-	compositor->use_pixman = !param->use_gl;
+	backend->prev_state = WESTON_COMPOSITOR_ACTIVE;
+	backend->use_pixman = !param->use_gl;
 
-	for (key = KEY_F1; key < KEY_F9; key++)
-		weston_compositor_add_key_binding(&compositor->base, key,
-		                                  MODIFIER_CTRL | MODIFIER_ALT,
-		                                  switch_vt_binding,
-		                                  compositor);
-	if (compositor->use_pixman) {
-		if (pixman_renderer_init(&compositor->base) < 0)
+	weston_setup_vt_switch_bindings(compositor);
+
+	if (backend->use_pixman) {
+		if (pixman_renderer_init(compositor) < 0)
 			goto out_launcher;
 	} else {
-		if (gl_renderer_create(&compositor->base, EGL_DEFAULT_DISPLAY,
-			gl_renderer_opaque_attribs, NULL) < 0) {
+		gl_renderer = weston_load_module("gl-renderer.so",
+						 "gl_renderer_interface");
+		if (!gl_renderer) {
+			weston_log("could not load gl renderer\n");
+			goto out_launcher;
+		}
+
+		if (gl_renderer->create(compositor, NO_EGL_PLATFORM,
+					EGL_DEFAULT_DISPLAY,
+					gl_renderer->opaque_attribs,
+					NULL, 0) < 0) {
 			weston_log("gl_renderer_create failed.\n");
 			goto out_launcher;
 		}
 	}
 
-	if (fbdev_output_create(compositor, param->device) < 0)
-		goto out_pixman;
+	if (fbdev_output_create(backend, param->device) < 0)
+		goto out_launcher;
 
-	udev_input_init(&compositor->input, &compositor->base, compositor->udev, seat_id);
+	udev_input_init(&backend->input, compositor, backend->udev, seat_id);
 
-	return &compositor->base;
-
-out_pixman:
-	compositor->base.renderer->destroy(&compositor->base);
+	compositor->backend = &backend->base;
+	return backend;
 
 out_launcher:
-	weston_launcher_destroy(compositor->base.launcher);
+	weston_launcher_destroy(compositor->launcher);
 
 out_udev:
-	udev_unref(compositor->udev);
+	udev_unref(backend->udev);
 
 out_compositor:
-	weston_compositor_shutdown(&compositor->base);
-
-out_free:
-	free(compositor);
+	weston_compositor_shutdown(compositor);
+	free(backend);
 
 	return NULL;
 }
 
-WL_EXPORT struct weston_compositor *
-backend_init(struct wl_display *display, int *argc, char *argv[],
-	     struct weston_config *config)
+WL_EXPORT int
+backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
+	     struct weston_config *config,
+	     struct weston_backend_config *config_base)
 {
+	struct fbdev_backend *b;
 	/* TODO: Ideally, available frame buffers should be enumerated using
 	 * udev, rather than passing a device node in as a parameter. */
 	struct fbdev_parameters param = {
@@ -971,5 +849,8 @@ backend_init(struct wl_display *display, int *argc, char *argv[],
 
 	parse_options(fbdev_options, ARRAY_LENGTH(fbdev_options), argc, argv);
 
-	return fbdev_compositor_create(display, argc, argv, config, &param);
+	b = fbdev_backend_create(compositor, argc, argv, config, &param);
+	if (b == NULL)
+		return -1;
+	return 0;
 }

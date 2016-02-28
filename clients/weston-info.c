@@ -1,35 +1,43 @@
 /*
  * Copyright © 2012 Philipp Brüschweiler
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
+#include "config.h"
+
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <wayland-client.h>
 
-#include "../shared/os-compatibility.h"
+#include "shared/helpers.h"
+#include "shared/os-compatibility.h"
+#include "presentation_timing-client-protocol.h"
 
 typedef void (*print_info_t)(void *info);
+typedef void (*destroy_info_t)(void *info);
 
 struct global_info {
 	struct wl_list link;
@@ -39,6 +47,7 @@ struct global_info {
 	char *interface;
 
 	print_info_t print;
+	destroy_info_t destroy;
 };
 
 struct output_mode {
@@ -54,8 +63,11 @@ struct output_info {
 
 	struct wl_output *output;
 
+	int32_t version;
+
 	struct {
 		int32_t x, y;
+		int32_t scale;
 		int32_t physical_width, physical_height;
 		enum wl_output_subpixel subpixel;
 		enum wl_output_transform output_transform;
@@ -82,9 +94,20 @@ struct shm_info {
 struct seat_info {
 	struct global_info global;
 	struct wl_seat *seat;
+	struct weston_info *info;
 
 	uint32_t capabilities;
 	char *name;
+
+	int32_t repeat_rate;
+	int32_t repeat_delay;
+};
+
+struct presentation_info {
+	struct global_info global;
+	struct presentation *presentation;
+
+	clockid_t clk_id;
 };
 
 struct weston_info {
@@ -96,16 +119,32 @@ struct weston_info {
 };
 
 static void *
-xmalloc(size_t s)
+fail_on_null(void *p)
 {
-	void *p = malloc(s);
-
 	if (p == NULL) {
-		fprintf(stderr, "out of memory\n");
-		exit(1);
+		fprintf(stderr, "%s: out of memory\n", program_invocation_short_name);
+		exit(EXIT_FAILURE);
 	}
 
 	return p;
+}
+
+static void *
+xmalloc(size_t s)
+{
+	return fail_on_null(malloc(s));
+}
+
+static void *
+xzalloc(size_t s)
+{
+	return fail_on_null(calloc(1, s));
+}
+
+static char *
+xstrdup(const char *s)
+{
+	return fail_on_null(strdup(s));
 }
 
 static void
@@ -124,7 +163,7 @@ init_global_info(struct weston_info *info,
 {
 	global->id = id;
 	global->version = version;
-	global->interface = strdup(interface);
+	global->interface = xstrdup(interface);
 
 	wl_list_insert(info->infos.prev, &global->link);
 }
@@ -197,14 +236,18 @@ print_output_info(void *data)
 		break;
 	}
 
-	printf("\tx: %d, y: %d,\n",
+	printf("\tx: %d, y: %d,",
 	       output->geometry.x, output->geometry.y);
+	if (output->version >= 2)
+		printf(" scale: %d,", output->geometry.scale);
+	printf("\n");
+
 	printf("\tphysical_width: %d mm, physical_height: %d mm,\n",
 	       output->geometry.physical_width,
 	       output->geometry.physical_height);
 	printf("\tmake: '%s', model: '%s',\n",
 	       output->geometry.make, output->geometry.model);
-	printf("\tsubpixel_orientation: %s, output_tranform: %s,\n",
+	printf("\tsubpixel_orientation: %s, output_transform: %s,\n",
 	       subpixel_orientation, transform);
 
 	wl_list_for_each(mode, &output->modes, link) {
@@ -234,8 +277,20 @@ print_shm_info(void *data)
 	printf("\tformats:");
 
 	wl_list_for_each(format, &shm->formats, link)
-		printf(" %s", (format->format == WL_SHM_FORMAT_ARGB8888) ?
-			      "ARGB8888" : "XRGB8888");
+		switch (format->format) {
+		case WL_SHM_FORMAT_ARGB8888:
+			printf(" ARGB8888");
+			break;
+		case WL_SHM_FORMAT_XRGB8888:
+			printf(" XRGB8888");
+			break;
+		case WL_SHM_FORMAT_RGB565:
+			printf(" RGB565");
+			break;
+		default:
+			printf(" unknown(%08x)", format->format);
+			break;
+		}
 
 	printf("\n");
 }
@@ -258,14 +313,89 @@ print_seat_info(void *data)
 		printf(" touch");
 
 	printf("\n");
+
+	if (seat->repeat_rate > 0)
+		printf("\tkeyboard repeat rate: %d\n", seat->repeat_rate);
+	if (seat->repeat_delay > 0)
+		printf("\tkeyboard repeat delay: %d\n", seat->repeat_delay);
 }
+
+static void
+keyboard_handle_keymap(void *data, struct wl_keyboard *keyboard,
+		       uint32_t format, int fd, uint32_t size)
+{
+}
+
+static void
+keyboard_handle_enter(void *data, struct wl_keyboard *keyboard,
+		      uint32_t serial, struct wl_surface *surface,
+		      struct wl_array *keys)
+{
+}
+
+static void
+keyboard_handle_leave(void *data, struct wl_keyboard *keyboard,
+		      uint32_t serial, struct wl_surface *surface)
+{
+}
+
+static void
+keyboard_handle_key(void *data, struct wl_keyboard *keyboard,
+		    uint32_t serial, uint32_t time, uint32_t key,
+		    uint32_t state)
+{
+}
+
+static void
+keyboard_handle_modifiers(void *data, struct wl_keyboard *keyboard,
+			  uint32_t serial, uint32_t mods_depressed,
+			  uint32_t mods_latched, uint32_t mods_locked,
+			  uint32_t group)
+{
+}
+
+static void
+keyboard_handle_repeat_info(void *data, struct wl_keyboard *keyboard,
+			    int32_t rate, int32_t delay)
+{
+	struct seat_info *seat = data;
+
+	seat->repeat_rate = rate;
+	seat->repeat_delay = delay;
+}
+
+static const struct wl_keyboard_listener keyboard_listener = {
+	keyboard_handle_keymap,
+	keyboard_handle_enter,
+	keyboard_handle_leave,
+	keyboard_handle_key,
+	keyboard_handle_modifiers,
+	keyboard_handle_repeat_info,
+};
 
 static void
 seat_handle_capabilities(void *data, struct wl_seat *wl_seat,
 			 enum wl_seat_capability caps)
 {
 	struct seat_info *seat = data;
+
 	seat->capabilities = caps;
+
+	/* we want listen for repeat_info from wl_keyboard, but only
+	 * do so if the seat info is >= 4 and if we actually have a
+	 * keyboard */
+	if (seat->global.version < 4)
+		return;
+
+	if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+		struct wl_keyboard *keyboard;
+
+		keyboard = wl_seat_get_keyboard(seat->seat);
+		wl_keyboard_add_listener(keyboard, &keyboard_listener,
+					 seat);
+
+		seat->info->roundtrip_needed = true;
+	}
 }
 
 static void
@@ -273,7 +403,7 @@ seat_handle_name(void *data, struct wl_seat *wl_seat,
 		 const char *name)
 {
 	struct seat_info *seat = data;
-	seat->name = strdup(name);
+	seat->name = xstrdup(name);
 }
 
 static const struct wl_seat_listener seat_listener = {
@@ -282,16 +412,34 @@ static const struct wl_seat_listener seat_listener = {
 };
 
 static void
+destroy_seat_info(void *data)
+{
+	struct seat_info *seat = data;
+
+	wl_seat_destroy(seat->seat);
+
+	if (seat->name != NULL)
+		free(seat->name);
+}
+
+static void
 add_seat_info(struct weston_info *info, uint32_t id, uint32_t version)
 {
-	struct seat_info *seat = xmalloc(sizeof *seat);
+	struct seat_info *seat = xzalloc(sizeof *seat);
+
+	/* required to set roundtrip_needed to true in capabilities
+	 * handler */
+	seat->info = info;
 
 	init_global_info(info, &seat->global, id, "wl_seat", version);
 	seat->global.print = print_seat_info;
+	seat->global.destroy = destroy_seat_info;
 
 	seat->seat = wl_registry_bind(info->registry,
-				      id, &wl_seat_interface, 2);
+				      id, &wl_seat_interface, MIN(version, 4));
 	wl_seat_add_listener(seat->seat, &seat_listener, seat);
+
+	seat->repeat_rate = seat->repeat_delay = -1;
 
 	info->roundtrip_needed = true;
 }
@@ -300,7 +448,7 @@ static void
 shm_handle_format(void *data, struct wl_shm *wl_shm, uint32_t format)
 {
 	struct shm_info *shm = data;
-	struct shm_format *shm_format = xmalloc(sizeof *shm_format);
+	struct shm_format *shm_format = xzalloc(sizeof *shm_format);
 
 	wl_list_insert(&shm->formats, &shm_format->link);
 	shm_format->format = format;
@@ -311,12 +459,28 @@ static const struct wl_shm_listener shm_listener = {
 };
 
 static void
+destroy_shm_info(void *data)
+{
+	struct shm_info *shm = data;
+	struct shm_format *format, *tmp;
+
+	wl_list_for_each_safe(format, tmp, &shm->formats, link) {
+		wl_list_remove(&format->link);
+		free(format);
+	}
+
+	wl_shm_destroy(shm->shm);
+}
+
+static void
 add_shm_info(struct weston_info *info, uint32_t id, uint32_t version)
 {
-	struct shm_info *shm = xmalloc(sizeof *shm);
+	struct shm_info *shm = xzalloc(sizeof *shm);
 
 	init_global_info(info, &shm->global, id, "wl_shm", version);
 	shm->global.print = print_shm_info;
+	shm->global.destroy = destroy_shm_info;
+
 	wl_list_init(&shm->formats);
 
 	shm->shm = wl_registry_bind(info->registry,
@@ -341,8 +505,8 @@ output_handle_geometry(void *data, struct wl_output *wl_output,
 	output->geometry.physical_width = physical_width;
 	output->geometry.physical_height = physical_height;
 	output->geometry.subpixel = subpixel;
-	output->geometry.make = strdup(make);
-	output->geometry.model = strdup(model);
+	output->geometry.make = xstrdup(make);
+	output->geometry.model = xstrdup(model);
 	output->geometry.output_transform = output_transform;
 }
 
@@ -362,23 +526,64 @@ output_handle_mode(void *data, struct wl_output *wl_output,
 	wl_list_insert(output->modes.prev, &mode->link);
 }
 
+static void
+output_handle_done(void *data, struct wl_output *wl_output)
+{
+	/* don't bother waiting for this; there's no good reason a
+	 * compositor will wait more than one roundtrip before sending
+	 * these initial events. */
+}
+
+static void
+output_handle_scale(void *data, struct wl_output *wl_output,
+		    int32_t scale)
+{
+	struct output_info *output = data;
+
+	output->geometry.scale = scale;
+}
+
 static const struct wl_output_listener output_listener = {
 	output_handle_geometry,
 	output_handle_mode,
+	output_handle_done,
+	output_handle_scale,
 };
+
+static void
+destroy_output_info(void *data)
+{
+	struct output_info *output = data;
+	struct output_mode *mode, *tmp;
+
+	wl_output_destroy(output->output);
+
+	if (output->geometry.make != NULL)
+		free(output->geometry.make);
+	if (output->geometry.model != NULL)
+		free(output->geometry.model);
+
+	wl_list_for_each_safe(mode, tmp, &output->modes, link) {
+		wl_list_remove(&mode->link);
+		free(mode);
+	}
+}
 
 static void
 add_output_info(struct weston_info *info, uint32_t id, uint32_t version)
 {
-	struct output_info *output = xmalloc(sizeof *output);
+	struct output_info *output = xzalloc(sizeof *output);
 
 	init_global_info(info, &output->global, id, "wl_output", version);
 	output->global.print = print_output_info;
+	output->global.destroy = destroy_output_info;
 
+	output->version = MIN(version, 2);
+	output->geometry.scale = 1;
 	wl_list_init(&output->modes);
 
 	output->output = wl_registry_bind(info->registry, id,
-					  &wl_output_interface, 1);
+					  &wl_output_interface, output->version);
 	wl_output_add_listener(output->output, &output_listener,
 			       output);
 
@@ -386,13 +591,89 @@ add_output_info(struct weston_info *info, uint32_t id, uint32_t version)
 }
 
 static void
+destroy_presentation_info(void *info)
+{
+	struct presentation_info *prinfo = info;
+
+	presentation_destroy(prinfo->presentation);
+}
+
+static const char *
+clock_name(clockid_t clk_id)
+{
+	static const char *names[] = {
+		[CLOCK_REALTIME] =		"CLOCK_REALTIME",
+		[CLOCK_MONOTONIC] =		"CLOCK_MONOTONIC",
+		[CLOCK_MONOTONIC_RAW] =		"CLOCK_MONOTONIC_RAW",
+		[CLOCK_REALTIME_COARSE] =	"CLOCK_REALTIME_COARSE",
+		[CLOCK_MONOTONIC_COARSE] =	"CLOCK_MONOTONIC_COARSE",
+#ifdef CLOCK_BOOTTIME
+		[CLOCK_BOOTTIME] =		"CLOCK_BOOTTIME",
+#endif
+	};
+
+	if (clk_id < 0 || (unsigned)clk_id >= ARRAY_LENGTH(names))
+		return "unknown";
+
+	return names[clk_id];
+}
+
+static void
+print_presentation_info(void *info)
+{
+	struct presentation_info *prinfo = info;
+
+	print_global_info(info);
+
+	printf("\tpresentation clock id: %d (%s)\n",
+		prinfo->clk_id, clock_name(prinfo->clk_id));
+}
+
+static void
+presentation_handle_clock_id(void *data, struct presentation *presentation,
+			     uint32_t clk_id)
+{
+	struct presentation_info *prinfo = data;
+
+	prinfo->clk_id = clk_id;
+}
+
+static const struct presentation_listener presentation_listener = {
+	presentation_handle_clock_id
+};
+
+static void
+add_presentation_info(struct weston_info *info, uint32_t id, uint32_t version)
+{
+	struct presentation_info *prinfo = xzalloc(sizeof *prinfo);
+
+	init_global_info(info, &prinfo->global, id, "presentation", version);
+	prinfo->global.print = print_presentation_info;
+	prinfo->global.destroy = destroy_presentation_info;
+
+	prinfo->clk_id = -1;
+	prinfo->presentation = wl_registry_bind(info->registry, id,
+						&presentation_interface, 1);
+	presentation_add_listener(prinfo->presentation, &presentation_listener,
+				  prinfo);
+
+	info->roundtrip_needed = true;
+}
+
+static void
+destroy_global_info(void *data)
+{
+}
+
+static void
 add_global_info(struct weston_info *info, uint32_t id,
 		const char *interface, uint32_t version)
 {
-	struct global_info *global = xmalloc(sizeof *global);
+	struct global_info *global = xzalloc(sizeof *global);
 
 	init_global_info(info, global, id, interface, version);
 	global->print = print_global_info;
+	global->destroy = destroy_global_info;
 }
 
 static void
@@ -407,6 +688,8 @@ global_handler(void *data, struct wl_registry *registry, uint32_t id,
 		add_shm_info(info, id, version);
 	else if (!strcmp(interface, "wl_output"))
 		add_output_info(info, id, version);
+	else if (!strcmp(interface, "presentation"))
+		add_presentation_info(info, id, version);
 	else
 		add_global_info(info, id, interface, version);
 }
@@ -428,6 +711,25 @@ print_infos(struct wl_list *infos)
 
 	wl_list_for_each(info, infos, link)
 		info->print(info);
+}
+
+static void
+destroy_info(void *data)
+{
+	struct global_info *global = data;
+
+	global->destroy(data);
+	wl_list_remove(&global->link);
+	free(global->interface);
+	free(data);
+}
+
+static void
+destroy_infos(struct wl_list *infos)
+{
+	struct global_info *info, *tmp;
+	wl_list_for_each_safe(info, tmp, infos, link)
+		destroy_info(info);
 }
 
 int
@@ -452,6 +754,10 @@ main(int argc, char **argv)
 	} while (info.roundtrip_needed);
 
 	print_infos(&info.infos);
+	destroy_infos(&info.infos);
+
+	wl_registry_destroy(info.registry);
+	wl_display_disconnect(info.display);
 
 	return 0;
 }

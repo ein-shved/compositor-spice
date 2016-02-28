@@ -1,23 +1,24 @@
 /*
  * Copyright © 2011 Tim Wiederhake
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 /**
@@ -30,11 +31,14 @@
  * \author Tim Wiederhake
  */
 
+#include "config.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <cairo.h>
 
+#include "shared/helpers.h"
 #include "window.h"
 
 /** window title */
@@ -168,8 +172,8 @@ keyboard_focus_handler(struct window *window,
 	int32_t x, y;
 	struct eventdemo *e = data;
 
-	if(log_focus) {
-		if(device) {
+	if (log_focus) {
+		if (device) {
 			input_get_position(device, &x, &y);
 			printf("focus x: %d, y: %d\n", x, y);
 		} else {
@@ -196,7 +200,7 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 {
 	uint32_t modifiers = input_get_modifiers(input);
 
-	if(!log_key)
+	if (!log_key)
 		return;
 
 	printf("key key: %d, unicode: %d, state: %s, modifiers: 0x%x\n",
@@ -255,6 +259,54 @@ axis_handler(struct widget *widget, struct input *input, uint32_t time,
 	       wl_fixed_to_double(value));
 }
 
+static void
+pointer_frame_handler(struct widget *widget, struct input *input, void *data)
+{
+	printf("pointer frame\n");
+}
+
+static void
+axis_source_handler(struct widget *widget, struct input *input,
+		    uint32_t source, void *data)
+{
+	const char *axis_source;
+
+	switch (source) {
+	case WL_POINTER_AXIS_SOURCE_WHEEL:
+		axis_source = "wheel";
+		break;
+	case WL_POINTER_AXIS_SOURCE_FINGER:
+		axis_source = "finger";
+		break;
+	case WL_POINTER_AXIS_SOURCE_CONTINUOUS:
+		axis_source = "continuous";
+		break;
+	default:
+		axis_source = "<invalid source value>";
+		break;
+	}
+
+	printf("axis source: %s\n", axis_source);
+}
+
+static void
+axis_stop_handler(struct widget *widget, struct input *input,
+		  uint32_t time, uint32_t axis,
+		  void *data)
+{
+	printf("axis stop time: %d, axis: %s\n",
+	       time,
+	       axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? "vertical" :
+							 "horizontal");
+}
+
+static void
+axis_discrete_handler(struct widget *widget, struct input *input,
+		      uint32_t axis, int32_t discrete, void *data)
+{
+	printf("axis discrete axis: %d value: %d\n", axis, discrete);
+}
+
 /**
  * \brief CALLBACK function, Waylands informs about pointer motion
  * \param widget widget
@@ -296,7 +348,7 @@ eventdemo_create(struct display *d)
 	struct eventdemo *e;
 
 	e = malloc(sizeof (struct eventdemo));
-	if(e == NULL)
+	if (e == NULL)
 		return NULL;
 
 	e->window = window_create(d);
@@ -307,7 +359,7 @@ eventdemo_create(struct display *d)
 		 */
 		e->widget = window_add_widget(e->window, e);
 	} else {
-		e->widget = frame_create(e->window, e);
+		e->widget = window_frame_create(e->window, e);
 		window_set_title(e->window, title);
 	}
 	e->display = d;
@@ -343,8 +395,15 @@ eventdemo_create(struct display *d)
 	/* Set the callback motion handler for the window */
 	widget_set_motion_handler(e->widget, motion_handler);
 
+	/* Set the callback pointer frame handler for the window */
+	widget_set_pointer_frame_handler(e->widget, pointer_frame_handler);
+
 	/* Set the callback axis handler for the window */
-	widget_set_axis_handler(e->widget, axis_handler);
+	widget_set_axis_handlers(e->widget,
+				 axis_handler,
+				 axis_source_handler,
+				 axis_stop_handler,
+				 axis_discrete_handler);
 
 	/* Initial drawing of the window */
 	window_schedule_resize(e->window, width, height);
@@ -371,13 +430,13 @@ static const struct weston_option eventdemo_options[] = {
 	{ WESTON_OPTION_INTEGER, "max-width", 0, &width_max },
 	{ WESTON_OPTION_INTEGER, "max-height", 0, &height_max },
 	{ WESTON_OPTION_BOOLEAN, "no-border", 'b', &noborder },
-	{ WESTON_OPTION_BOOLEAN, "log-redraw", '0', &log_redraw },
-	{ WESTON_OPTION_BOOLEAN, "log-resize", '0', &log_resize },
-	{ WESTON_OPTION_BOOLEAN, "log-focus", '0', &log_focus },
-	{ WESTON_OPTION_BOOLEAN, "log-key", '0', &log_key },
-	{ WESTON_OPTION_BOOLEAN, "log-button", '0', &log_button },
-	{ WESTON_OPTION_BOOLEAN, "log-axis", '0', &log_axis },
-	{ WESTON_OPTION_BOOLEAN, "log-motion", '0', &log_motion },
+	{ WESTON_OPTION_BOOLEAN, "log-redraw", 0, &log_redraw },
+	{ WESTON_OPTION_BOOLEAN, "log-resize", 0, &log_resize },
+	{ WESTON_OPTION_BOOLEAN, "log-focus", 0, &log_focus },
+	{ WESTON_OPTION_BOOLEAN, "log-key", 0, &log_key },
+	{ WESTON_OPTION_BOOLEAN, "log-button", 0, &log_button },
+	{ WESTON_OPTION_BOOLEAN, "log-axis", 0, &log_axis },
+	{ WESTON_OPTION_BOOLEAN, "log-motion", 0, &log_motion },
 };
 
 /**
@@ -390,8 +449,32 @@ main(int argc, char *argv[])
 	struct display *d;
 	struct eventdemo *e;
 
-	parse_options(eventdemo_options,
-		      ARRAY_LENGTH(eventdemo_options), &argc, argv);
+	if (parse_options(eventdemo_options,
+			  ARRAY_LENGTH(eventdemo_options), &argc, argv) > 1) {
+		unsigned k;
+		printf("Usage: %s [OPTIONS]\n\n", argv[0]);
+		for (k = 0; k < ARRAY_LENGTH(eventdemo_options); k++) {
+			const struct weston_option* p = &eventdemo_options[k];
+			if (p->name) {
+				printf("  --%s", p->name);
+				if (p->type != WESTON_OPTION_BOOLEAN)
+					printf("=VALUE");
+				putchar('\n');
+			}
+			if (p->short_name) {
+				printf("  -%c", p->short_name);
+				if (p->type != WESTON_OPTION_BOOLEAN)
+					printf("VALUE");
+				putchar('\n');
+			}
+		}
+		return 1;
+	}
+
+	if (!log_redraw && !log_resize && !log_focus && !log_key &&
+	    !log_button && !log_axis && !log_motion)
+	  log_redraw = log_resize = log_focus = log_key =
+	    log_button = log_axis = log_motion = 1;
 
 	/* Connect to the display and have the arguments parsed */
 	d = display_create(&argc, argv);

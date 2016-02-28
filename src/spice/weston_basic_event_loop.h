@@ -24,8 +24,8 @@
 #define __BASIC_EVENT_LOOP_H__
 
 #include <spice.h>
-#include <weston/compositor.h>
+#include "compositor.h"
 
-SpiceCoreInterface *basic_event_loop_init(struct wl_display *display);
+SpiceCoreInterface *basic_event_loop_init(struct weston_compositor *compositor);
 
 #endif // __BASIC_EVENT_LOOP_H__

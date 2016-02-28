@@ -2,24 +2,29 @@
  * Copyright © 2012 Intel Corporation
  * Copyright © 2013 Collabora, Ltd.
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
+
+#include "config.h"
 
 #include "weston-test-client-helper.h"
 
@@ -57,7 +62,7 @@ check_pointer(struct client *client, int x, int y)
 static void
 check_pointer_move(struct client *client, int x, int y)
 {
-	wl_test_move_pointer(client->test->wl_test, x, y);
+	weston_test_move_pointer(client->test->weston_test, x, y);
 	client_roundtrip(client);
 	check_pointer(client, x, y);
 }
@@ -67,7 +72,7 @@ TEST(test_pointer_top_left)
 	struct client *client;
 	int x, y;
 
-	client = client_create(46, 76, 111, 134);
+	client = create_client_and_test_surface(46, 76, 111, 134);
 	assert(client);
 
 	/* move pointer outside top left */
@@ -92,7 +97,7 @@ TEST(test_pointer_bottom_left)
 	struct client *client;
 	int x, y;
 
-	client = client_create(99, 100, 100, 98);
+	client = create_client_and_test_surface(99, 100, 100, 98);
 	assert(client);
 
 	/* move pointer outside bottom left */
@@ -117,7 +122,7 @@ TEST(test_pointer_top_right)
 	struct client *client;
 	int x, y;
 
-	client = client_create(48, 100, 67, 100);
+	client = create_client_and_test_surface(48, 100, 67, 100);
 	assert(client);
 
 	/* move pointer outside top right */
@@ -142,7 +147,7 @@ TEST(test_pointer_bottom_right)
 	struct client *client;
 	int x, y;
 
-	client = client_create(100, 123, 100, 69);
+	client = create_client_and_test_surface(100, 123, 100, 69);
 	assert(client);
 
 	/* move pointer outside bottom right */
@@ -167,7 +172,7 @@ TEST(test_pointer_top_center)
 	struct client *client;
 	int x, y;
 
-	client = client_create(100, 201, 100, 50);
+	client = create_client_and_test_surface(100, 201, 100, 50);
 	assert(client);
 
 	/* move pointer outside top center */
@@ -192,7 +197,7 @@ TEST(test_pointer_bottom_center)
 	struct client *client;
 	int x, y;
 
-	client = client_create(100, 45, 67, 100);
+	client = create_client_and_test_surface(100, 45, 67, 100);
 	assert(client);
 
 	/* move pointer outside bottom center */
@@ -217,7 +222,7 @@ TEST(test_pointer_left_center)
 	struct client *client;
 	int x, y;
 
-	client = client_create(167, 45, 78, 100);
+	client = create_client_and_test_surface(167, 45, 78, 100);
 	assert(client);
 
 	/* move pointer outside left center */
@@ -242,7 +247,7 @@ TEST(test_pointer_right_center)
 	struct client *client;
 	int x, y;
 
-	client = client_create(110, 37, 100, 46);
+	client = create_client_and_test_surface(110, 37, 100, 46);
 	assert(client);
 
 	/* move pointer outside right center */
@@ -266,7 +271,7 @@ TEST(test_pointer_surface_move)
 {
 	struct client *client;
 
-	client = client_create(100, 100, 100, 100);
+	client = create_client_and_test_surface(100, 100, 100, 100);
 	assert(client);
 
 	/* move pointer outside of client */
@@ -308,7 +313,7 @@ TEST(test_surface_output)
 	struct client *client;
 	int x, y;
 
-	client = client_create(100, 100, 100, 100);
+	client = create_client_and_test_surface(100, 100, 100, 100);
 	assert(client);
 
 	assert(output_contains_client(client));
@@ -373,7 +378,7 @@ TEST(buffer_release)
 	int buf3_released = 0;
 	int frame;
 
-	client = client_create(100, 100, 100, 100);
+	client = create_client_and_test_surface(100, 100, 100, 100);
 	assert(client);
 	surface = client->surface->wl_surface;
 

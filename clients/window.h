@@ -1,40 +1,37 @@
 /*
  * Copyright © 2008 Kristian Høgsberg
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #ifndef _WINDOW_H_
 #define _WINDOW_H_
 
+#include "config.h"
+
 #include <xkbcommon/xkbcommon.h>
 #include <wayland-client.h>
 #include <cairo.h>
-#include "../shared/config-parser.h"
-#include "../shared/zalloc.h"
-#include "subsurface-client-protocol.h"
-
-#define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
-
-#define container_of(ptr, type, member) ({				\
-	const __typeof__( ((type *)0)->member ) *__mptr = (ptr);	\
-	(type *)( (char *)__mptr - offsetof(type,member) );})
+#include "shared/config-parser.h"
+#include "shared/zalloc.h"
+#include "shared/platform.h"
 
 struct window;
 struct widget;
@@ -62,6 +59,8 @@ void *
 xzalloc(size_t s);
 char *
 xstrdup(const char *s);
+void *
+xrealloc(char *p, size_t s);
 
 struct display *
 display_create(int *argc, char *argv[]);
@@ -87,9 +86,6 @@ display_get_cairo_device(struct display *display);
 struct wl_compositor *
 display_get_compositor(struct display *display);
 
-struct wl_shell *
-display_get_shell(struct display *display);
-
 struct output *
 display_get_output(struct display *display);
 
@@ -104,6 +100,9 @@ typedef void (*display_global_handler_t)(struct display *display,
 void
 display_set_global_handler(struct display *display,
 			   display_global_handler_t handler);
+void
+display_set_global_handler_remove(struct display *display,
+			   display_global_handler_t remove_handler);
 void *
 display_bind(struct display *display, uint32_t name,
 	     const struct wl_interface *interface, uint32_t version);
@@ -176,6 +175,9 @@ display_run(struct display *d);
 void
 display_exit(struct display *d);
 
+int
+display_get_data_device_manager_version(struct display *d);
+
 enum cursor_type {
 	CURSOR_BOTTOM_LEFT,
 	CURSOR_BOTTOM_RIGHT,
@@ -190,6 +192,9 @@ enum cursor_type {
 	CURSOR_IBEAM,
 	CURSOR_HAND1,
 	CURSOR_WATCH,
+	CURSOR_DND_MOVE,
+	CURSOR_DND_COPY,
+	CURSOR_DND_FORBIDDEN,
 
 	CURSOR_BLANK
 };
@@ -211,11 +216,13 @@ typedef void (*window_drop_handler_t)(struct window *window,
 				      struct input *input,
 				      int32_t x, int32_t y, void *data);
 
-typedef void (*window_close_handler_t)(struct window *window, void *data);
+typedef void (*window_close_handler_t)(void *data);
 typedef void (*window_fullscreen_handler_t)(struct window *window, void *data);
 
 typedef void (*window_output_handler_t)(struct window *window, struct output *output,
 					int enter, void *data);
+typedef void (*window_state_changed_handler_t)(struct window *window,
+					       void *data);
 
 typedef void (*widget_resize_handler_t)(struct widget *widget,
 					int32_t width, int32_t height,
@@ -256,9 +263,9 @@ typedef void (*widget_touch_motion_handler_t)(struct widget *widget,
 					      float x,
 					      float y,
 					      void *data);
-typedef void (*widget_touch_frame_handler_t)(struct widget *widget, 
+typedef void (*widget_touch_frame_handler_t)(struct widget *widget,
 					     struct input *input, void *data);
-typedef void (*widget_touch_cancel_handler_t)(struct widget *widget, 
+typedef void (*widget_touch_cancel_handler_t)(struct widget *widget,
 					      struct input *input, void *data);
 typedef void (*widget_axis_handler_t)(struct widget *widget,
 				      struct input *input, uint32_t time,
@@ -266,19 +273,47 @@ typedef void (*widget_axis_handler_t)(struct widget *widget,
 				      wl_fixed_t value,
 				      void *data);
 
+typedef void (*widget_pointer_frame_handler_t)(struct widget *widget,
+					       struct input *input,
+					       void *data);
+
+typedef void (*widget_axis_source_handler_t)(struct widget *widget,
+					     struct input *input,
+					     uint32_t source,
+					     void *data);
+
+typedef void (*widget_axis_stop_handler_t)(struct widget *widget,
+					   struct input *input,
+					   uint32_t time,
+					   uint32_t axis,
+					   void *data);
+
+typedef void (*widget_axis_discrete_handler_t)(struct widget *widget,
+					       struct input *input,
+					       uint32_t axis,
+					       int32_t discrete,
+					       void *data);
+
 struct window *
 window_create(struct display *display);
 struct window *
-window_create_transient(struct display *display, struct window *parent,
-			int32_t x, int32_t y, uint32_t flags);
-struct window *
 window_create_custom(struct display *display);
+
+void
+window_set_parent(struct window *window, struct window *parent_window);
+struct window *
+window_get_parent(struct window *window);
 
 int
 window_has_focus(struct window *window);
 
-typedef void (*menu_func_t)(struct window *window, int index, void *data);
+typedef void (*menu_func_t)(void *data, struct input *input, int index);
 
+struct window *
+window_create_menu(struct display *display,
+		   struct input *input, uint32_t time,
+		   menu_func_t func, const char **entries, int count,
+		   void *user_data);
 void
 window_show_menu(struct display *display,
 		 struct input *input, uint32_t time, struct window *parent,
@@ -329,17 +364,11 @@ window_get_display(struct window *window);
 void
 window_move(struct window *window, struct input *input, uint32_t time);
 void
-window_touch_move(struct window *window, struct input *input, uint32_t time);
-void
 window_get_allocation(struct window *window, struct rectangle *allocation);
 void
 window_schedule_redraw(struct window *window);
 void
 window_schedule_resize(struct window *window, int width, int height);
-
-void
-window_damage(struct window *window, int32_t x, int32_t y,
-	      int32_t width, int32_t height);
 
 cairo_surface_t *
 window_get_surface(struct window *window);
@@ -347,8 +376,8 @@ window_get_surface(struct window *window);
 struct wl_surface *
 window_get_wl_surface(struct window *window);
 
-struct wl_shell_surface *
-window_get_wl_shell_surface(struct window *window);
+struct wl_subsurface *
+widget_get_wl_subsurface(struct widget *widget);
 
 enum window_buffer_type {
 	WINDOW_BUFFER_TYPE_EGL_WINDOW,
@@ -362,20 +391,26 @@ display_surface_damage(struct display *display, cairo_surface_t *cairo_surface,
 void
 window_set_buffer_type(struct window *window, enum window_buffer_type type);
 
+enum window_buffer_type
+window_get_buffer_type(struct window *window);
+
 int
 window_is_fullscreen(struct window *window);
 
 void
 window_set_fullscreen(struct window *window, int fullscreen);
 
-void
-window_set_fullscreen_method(struct window *window,
-			     enum wl_shell_surface_fullscreen_method method);
 int
 window_is_maximized(struct window *window);
 
 void
 window_set_maximized(struct window *window, int maximized);
+
+int
+window_is_resizing(struct window *window);
+
+void
+window_set_minimized(struct window *window);
 
 void
 window_set_user_data(struct window *window, void *data);
@@ -408,6 +443,9 @@ window_set_fullscreen_handler(struct window *window,
 void
 window_set_output_handler(struct window *window,
 			  window_output_handler_t handler);
+void
+window_set_state_changed_handler(struct window *window,
+				 window_state_changed_handler_t handler);
 
 void
 window_set_title(struct window *window, const char *title);
@@ -505,13 +543,26 @@ void
 widget_set_axis_handler(struct widget *widget,
 			widget_axis_handler_t handler);
 void
-widget_schedule_redraw(struct widget *widget);
-
-struct widget *
-frame_create(struct window *window, void *data);
+widget_set_pointer_frame_handler(struct widget *widget,
+				 widget_pointer_frame_handler_t handler);
+void
+widget_set_axis_handlers(struct widget *widget,
+			widget_axis_handler_t axis_handler,
+			widget_axis_source_handler_t axis_source_handler,
+			widget_axis_stop_handler_t axis_stop_handler,
+			widget_axis_discrete_handler_t axis_discrete_handler);
 
 void
-frame_set_child_size(struct widget *widget, int child_width, int child_height);
+widget_schedule_redraw(struct widget *widget);
+void
+widget_set_use_cairo(struct widget *widget, int use_cairo);
+
+struct widget *
+window_frame_create(struct window *window, void *data);
+
+void
+window_frame_set_child_size(struct widget *widget, int child_width,
+			    int child_height);
 
 void
 input_set_pointer_image(struct input *input, int pointer);
@@ -519,12 +570,21 @@ input_set_pointer_image(struct input *input, int pointer);
 void
 input_get_position(struct input *input, int32_t *x, int32_t *y);
 
+int
+input_get_touch(struct input *input, int32_t id, float *x, float *y);
+
 #define MOD_SHIFT_MASK		0x01
 #define MOD_ALT_MASK		0x02
 #define MOD_CONTROL_MASK	0x04
 
 uint32_t
 input_get_modifiers(struct input *input);
+
+void
+touch_grab(struct input *input, int32_t touch_id);
+
+void
+touch_ungrab(struct input *input);
 
 void
 input_grab(struct input *input, struct widget *widget, uint32_t button);
@@ -587,6 +647,12 @@ output_get_transform(struct output *output);
 
 uint32_t
 output_get_scale(struct output *output);
+
+const char *
+output_get_make(struct output *output);
+
+const char *
+output_get_model(struct output *output);
 
 void
 keysym_modifiers_add(struct wl_array *modifiers_map,

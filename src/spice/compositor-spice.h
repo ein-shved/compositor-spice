@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013 Yury Shvedov <shved@lvk.cs.msu.su>
+ * Copyright © 2013-2016 Yury Shvedov <shved@lvk.cs.msu.su>
  *
  * Permission to use, copy, modify, distribute, and sell this software and
  * its documentation for any purpose is hereby granted without fee, provided
@@ -26,7 +26,10 @@
 #include <assert.h>
 #include <spice.h>
 
-#include "../compositor.h"
+#include "shared/helpers.h"
+#include "compositor.h"
+#include "pixman-renderer.h"
+
 #include "compositor-spice-conf.h"
 #include "weston_spice_interfaces.h"
 
@@ -48,12 +51,13 @@
 #define weston_log_error(err_str)\
     weston_log("%s: error detected. %s returned.\n", __func__, (err_str));
 
-/* TODO: is it necessary to support 
- * several instances of spice_compositor?
+/* TODO: is it necessary to support
+ * several instances of spice_backend?
  */
 
-struct spice_compositor {
-    struct weston_compositor base;
+struct spice_backend {
+    struct weston_backend base;
+    struct weston_compositor *compositor;
 
     SpiceServer *spice_server;
 
@@ -63,7 +67,7 @@ struct spice_compositor {
     SpiceTimer *wakeup_timer;
     QXLWorker *worker;
     uint32_t mm_clock;
-  
+
     struct spice_output *primary_output;
     struct weston_seat core_seat;
 
@@ -71,12 +75,12 @@ struct spice_compositor {
     weston_spice_kbd_t *kbd;
     weston_spice_qxl_t *qxl;
 
-    void (*produce_command) (struct spice_compositor*);
-    int (*push_command) (struct spice_compositor*, QXLCommandExt *);
-    void (*release_resource) (struct spice_compositor*, QXLCommandExt *);
+    void (*produce_command) (struct spice_backend*);
+    int (*push_command) (struct spice_backend*, QXLCommandExt *);
+    void (*release_resource) (struct spice_backend*, QXLCommandExt *);
 };
 
 uint32_t
-spice_get_primary_surface_id (struct spice_compositor *c);
+spice_get_primary_surface_id (struct spice_backend *c);
 
 #endif //COMPOSITOR_SPICE_H

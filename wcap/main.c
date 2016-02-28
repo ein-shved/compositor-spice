@@ -1,26 +1,29 @@
 /*
  * Copyright © 2012 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
-#include <config.h>
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -151,7 +154,7 @@ convert_to_yuv444(struct wcap_decoder *decoder, unsigned char *out)
 		up = yp + (psize * 2);
 		vp = yp + (psize * 1);
 		rp = decoder->frame + decoder->width * i;
-		end = rp + decoder->width;	
+		end = rp + decoder->width;
 		while (rp < end) {
 			u = 0;
 			v = 0;
@@ -214,7 +217,7 @@ int main(int argc, char *argv[])
 	int num = 30, denom = 1;
 	char filename[200];
 	char *mode;
-	uint32_t msecs, frame_time, *frame, frame_size;
+	uint32_t msecs, frame_time;
 
 	for (i = 1, j = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--yuv4mpeg2-444") == 0) {
@@ -251,6 +254,10 @@ int main(int argc, char *argv[])
 	}
 
 	decoder = wcap_decoder_create(argv[1]);
+	if (decoder == NULL) {
+		fprintf(stderr, "Creating wcap decoder failed\n");
+		exit(EXIT_FAILURE);
+	}
 
 	if (yuv4mpeg2 && isatty(1)) {
 		fprintf(stderr, "Not dumping yuv4mpeg2 data to terminal.  Pipe output to a file or a process.\n");
@@ -276,11 +283,7 @@ int main(int argc, char *argv[])
 	has_frame = wcap_decoder_get_frame(decoder);
 	msecs = decoder->msecs;
 	frame_time = 1000 * denom / num;
-	frame_size = decoder->width * decoder->height * 4;
-	frame = malloc(frame_size);
 	while (has_frame) {
-		if (decoder->msecs >= msecs)
-			memcpy(frame, decoder->frame, frame_size);
 		if (all || i == output_frame) {
 			snprintf(filename, sizeof filename,
 				 "wcap-frame-%d.png", i);

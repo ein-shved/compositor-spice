@@ -1,36 +1,44 @@
 /*
  * Copyright © 2012 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #include "config.h"
+
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <sys/wait.h>
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
 #include <signal.h>
+
 #include "weston-test-runner.h"
+
+#define SKIP 77
+
+char __attribute__((weak)) *server_parameters="";
 
 extern const struct weston_test __start_test_section, __stop_test_section;
 
@@ -67,6 +75,7 @@ static int
 exec_and_report_test(const struct weston_test *t, void *test_data, int iteration)
 {
 	int success = 0;
+	int skip = 0;
 	int hardfail = 0;
 	siginfo_t info;
 
@@ -91,6 +100,8 @@ exec_and_report_test(const struct weston_test *t, void *test_data, int iteration
 		fprintf(stderr, "exit status %d", info.si_status);
 		if (info.si_status == EXIT_SUCCESS)
 			success = 1;
+		else if (info.si_status == SKIP)
+			skip = 1;
 		break;
 	case CLD_KILLED:
 	case CLD_DUMPED:
@@ -106,7 +117,10 @@ exec_and_report_test(const struct weston_test *t, void *test_data, int iteration
 	if (success && !hardfail) {
 		fprintf(stderr, ", pass.\n");
 		return 1;
-	} else { 
+	} else if (skip) {
+		fprintf(stderr, ", skip.\n");
+		return SKIP;
+	} else {
 		fprintf(stderr, ", fail.\n");
 		return 0;
 	}
@@ -114,13 +128,16 @@ exec_and_report_test(const struct weston_test *t, void *test_data, int iteration
 
 /* Returns number of tests and number of pass / fail in param args */
 static int
-iterate_test(const struct weston_test *t, int *passed)
+iterate_test(const struct weston_test *t, int *passed, int *skipped)
 {
-	int i;
+	int ret, i;
 	void *current_test_data = (void *) t->table_data;
 	for (i = 0; i < t->n_elements; ++i, current_test_data += t->element_size)
 	{
-		if (exec_and_report_test(t, current_test_data, i))
+		ret = exec_and_report_test(t, current_test_data, i);
+		if (ret == SKIP)
+			++(*skipped);
+		else if (ret)
 			++(*passed);
 	}
 
@@ -132,6 +149,7 @@ int main(int argc, char *argv[])
 	const struct weston_test *t;
 	int total = 0;
 	int pass = 0;
+	int skip = 0;
 
 	if (argc == 2) {
 		const char *testname = argv[1];
@@ -142,6 +160,12 @@ int main(int argc, char *argv[])
 			exit(EXIT_SUCCESS);
 		}
 
+		if (strcmp(testname, "--params") == 0 ||
+		    strcmp(testname, "-p") == 0) {
+			printf("%s", server_parameters);
+			exit(EXIT_SUCCESS);
+		}
+
 		t = find_test(argv[1]);
 		if (t == NULL) {
 			fprintf(stderr, "unknown test: \"%s\"\n", argv[1]);
@@ -149,19 +173,26 @@ int main(int argc, char *argv[])
 			exit(EXIT_FAILURE);
 		}
 
-		int number_passed_in_test = 0;
-		total += iterate_test(t, &number_passed_in_test);
+		int number_passed_in_test = 0, number_skipped_in_test = 0;
+		total += iterate_test(t, &number_passed_in_test, &number_skipped_in_test);
 		pass += number_passed_in_test;
+		skip += number_skipped_in_test;
 	} else {
 		for (t = &__start_test_section; t < &__stop_test_section; t++) {
-			int number_passed_in_test = 0;
-			total += iterate_test(t, &number_passed_in_test);
+			int number_passed_in_test = 0, number_skipped_in_test = 0;
+			total += iterate_test(t, &number_passed_in_test, &number_skipped_in_test);
 			pass += number_passed_in_test;
+			skip += number_skipped_in_test;
 		}
 	}
 
-	fprintf(stderr, "%d tests, %d pass, %d fail\n",
-		total, pass, total - pass);
+	fprintf(stderr, "%d tests, %d pass, %d skip, %d fail\n",
+		total, pass, skip, total - pass - skip);
 
-	return pass == total ? EXIT_SUCCESS : EXIT_FAILURE;
+	if (skip == total)
+		return SKIP;
+	else if (pass + skip == total)
+		return EXIT_SUCCESS;
+
+	return EXIT_FAILURE;
 }

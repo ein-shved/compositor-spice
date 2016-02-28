@@ -1,24 +1,27 @@
 /*
  * Copyright © 2010 Kristian Høgsberg
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -37,7 +40,6 @@ struct smoke {
 	struct widget *widget;
 	int width, height;
 	int current;
-	uint32_t time;
 	struct { float *d, *u, *v; } b[2];
 };
 
@@ -86,10 +88,10 @@ static void advect(struct smoke *smoke, uint32_t time,
 				px = 0.5;
 			if (py < 0.5)
 				py = 0.5;
-			if (px > smoke->width - 0.5)
-				px = smoke->width - 0.5;
-			if (py > smoke->height - 0.5)
-				py = smoke->height - 0.5;
+			if (px > smoke->width - 1.5)
+				px = smoke->width - 1.5;
+			if (py > smoke->height - 1.5)
+				py = smoke->height - 1.5;
 			i = (int) px;
 			j = (int) py;
 			fx = px - i;
@@ -169,27 +171,10 @@ static void render(struct smoke *smoke, cairo_surface_t *surface)
 }
 
 static void
-frame_callback(void *data, struct wl_callback *callback, uint32_t time)
-{
-	struct smoke *smoke = data;
-
-	window_schedule_redraw(smoke->window);
-	smoke->time = time;
-
-	if (callback)
-		wl_callback_destroy(callback);
-}
-
-static const struct wl_callback_listener listener = {
-	frame_callback,
-};
-
-static void
 redraw_handler(struct widget *widget, void *data)
 {
 	struct smoke *smoke = data;
-	uint32_t time = smoke->time;
-	struct wl_callback *callback;
+	uint32_t time = widget_get_last_time(smoke->widget);
 	cairo_surface_t *surface;
 
 	diffuse(smoke, time / 30, smoke->b[0].u, smoke->b[1].u);
@@ -216,13 +201,9 @@ redraw_handler(struct widget *widget, void *data)
 
 	render(smoke, surface);
 
-	window_damage(smoke->window, 0, 0, smoke->width, smoke->height);
-
 	cairo_surface_destroy(surface);
 
-	callback = wl_surface_frame(window_get_wl_surface(smoke->window));
-	wl_callback_add_listener(callback, &listener, smoke);
-	wl_surface_commit(window_get_wl_surface(smoke->window));
+	widget_schedule_redraw(smoke->widget);
 }
 
 static void
@@ -326,6 +307,10 @@ int main(int argc, char *argv[])
 	widget_schedule_resize(smoke.widget, smoke.width, smoke.height);
 
 	display_run(d);
+
+	widget_destroy(smoke.widget);
+	window_destroy(smoke.window);
+	display_destroy(d);
 
 	return 0;
 }

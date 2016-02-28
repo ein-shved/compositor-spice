@@ -1,43 +1,92 @@
 #!/bin/bash
 
-TESTNAME=$1
+TEST_FILE=${1##*/}
+TEST_NAME=${TEST_FILE%.*}
 
-if test -z "$TESTNAME"; then
+if [ -z "$TEST_NAME" ]; then
 	echo "usage: $(basename $0) <test name>"
 	exit 1;
 fi
 
-WESTON=$abs_builddir/../src/weston
+WESTON=$abs_builddir/weston
 LOGDIR=$abs_builddir/logs
 
-mkdir -p "$LOGDIR"
+mkdir -p "$LOGDIR" || exit
 
-SERVERLOG="$LOGDIR/$1-serverlog.txt"
-OUTLOG="$LOGDIR/$1-log.txt"
+SERVERLOG="$LOGDIR/${TEST_NAME}-serverlog.txt"
+OUTLOG="$LOGDIR/${TEST_NAME}-log.txt"
 
-rm -f "$SERVERLOG"
+rm -f "$SERVERLOG" || exit
 
-if test x$WAYLAND_DISPLAY != x; then
-	BACKEND=$abs_builddir/../src/.libs/wayland-backend.so
-elif test x$DISPLAY != x; then
-	BACKEND=$abs_builddir/../src/.libs/x11-backend.so
+BACKEND=${BACKEND:-headless-backend.so}
+
+MODDIR=$abs_builddir/.libs
+
+SHELL_PLUGIN=$MODDIR/desktop-shell.so
+TEST_PLUGIN=$MODDIR/weston-test.so
+XWAYLAND_PLUGIN=$MODDIR/xwayland.so
+
+CONFIG_FILE="${TEST_NAME}.ini"
+
+if [ -e "${abs_builddir}/${CONFIG_FILE}" ]; then
+       CONFIG="--config=${abs_builddir}/${CONFIG_FILE}"
+elif [ -e "${abs_top_srcdir}/tests/${CONFIG_FILE}" ]; then
+       CONFIG="--config=${abs_top_srcdir}/tests/${CONFIG_FILE}"
 else
-	BACKEND=$abs_builddir/../src/.libs/wayland-backend.so
+       CONFIG="--no-config"
 fi
 
-case $TESTNAME in
-	*.la|*.so)
-		$WESTON --backend=$BACKEND \
-			--socket=test-$(basename $TESTNAME) \
-			--modules=$abs_builddir/.libs/${TESTNAME/.la/.so},xwayland.so \
+case $TEST_FILE in
+	ivi-*.la|ivi-*.so)
+		SHELL_PLUGIN=$MODDIR/ivi-shell.so
+
+		WESTON_BUILD_DIR=$abs_builddir \
+		WESTON_TEST_REFERENCE_PATH=$abs_top_srcdir/tests/reference \
+		$WESTON --backend=$MODDIR/$BACKEND \
+			--config=$abs_builddir/tests/weston-ivi.ini \
+			--shell=$SHELL_PLUGIN \
+			--socket=test-${TEST_NAME} \
+			--modules=$TEST_PLUGIN \
+			--ivi-module=$MODDIR/${TEST_FILE/.la/.so} \
 			--log="$SERVERLOG" \
 			&> "$OUTLOG"
 		;;
-	*)
-		WESTON_TEST_CLIENT_PATH=$abs_builddir/$TESTNAME $WESTON \
-			--socket=test-$(basename $TESTNAME) \
-			--backend=$BACKEND \
+	*.la|*.so)
+		WESTON_BUILD_DIR=$abs_builddir \
+		WESTON_TEST_REFERENCE_PATH=$abs_top_srcdir/tests/reference \
+		$WESTON --backend=$MODDIR/$BACKEND \
+			${CONFIG} \
+			--shell=$SHELL_PLUGIN \
+			--socket=test-${TEST_NAME} \
+			--modules=$MODDIR/${TEST_FILE/.la/.so},$XWAYLAND_PLUGIN \
 			--log="$SERVERLOG" \
-			--modules=$abs_builddir/.libs/weston-test.so,xwayland.so \
+			&> "$OUTLOG"
+		;;
+	ivi-*.weston)
+		SHELL_PLUGIN=$MODDIR/ivi-shell.so
+
+		WESTON_BUILD_DIR=$abs_builddir \
+		WESTON_TEST_REFERENCE_PATH=$abs_top_srcdir/tests/reference \
+		WESTON_TEST_CLIENT_PATH=$abs_builddir/$TEST_FILE \
+		$WESTON --backend=$MODDIR/$BACKEND \
+			--config=$abs_builddir/tests/weston-ivi.ini \
+			--shell=$SHELL_PLUGIN \
+			--socket=test-${TEST_NAME} \
+			--modules=$TEST_PLUGIN \
+			--log="$SERVERLOG" \
+			$($abs_builddir/$TESTNAME --params) \
+			&> "$OUTLOG"
+		;;
+	*)
+		WESTON_BUILD_DIR=$abs_builddir \
+		WESTON_TEST_REFERENCE_PATH=$abs_top_srcdir/tests/reference \
+		WESTON_TEST_CLIENT_PATH=$abs_builddir/$TEST_FILE \
+		$WESTON --backend=$MODDIR/$BACKEND \
+			${CONFIG} \
+			--shell=$SHELL_PLUGIN \
+			--socket=test-${TEST_NAME} \
+			--modules=$TEST_PLUGIN,$XWAYLAND_PLUGIN \
+			--log="$SERVERLOG" \
+			$($abs_builddir/$TEST_FILE --params) \
 			&> "$OUTLOG"
 esac

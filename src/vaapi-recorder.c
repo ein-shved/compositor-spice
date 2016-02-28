@@ -1,53 +1,37 @@
 /*
+ * Copyright (c) 2012 Intel Corporation. All Rights Reserved.
  * Copyright © 2013 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and
- * its documentation for any purpose is hereby granted without fee, provided
- * that the above copyright notice appear in all copies and that both that
- * copyright notice and this permission notice appear in supporting
- * documentation, and that the name of the copyright holders not be used in
- * advertising or publicity pertaining to distribution of the software
- * without specific, written prior permission.  The copyright holders make
- * no representations about the suitability of this software for any
- * purpose.  It is provided "as is" without express or implied warranty.
- *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
- * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
- * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
- * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
- * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
- * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
-
-/* Copyright (c) 2012 Intel Corporation. All Rights Reserved.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
  * "Software"), to deal in the Software without restriction, including
  * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sub license, and/or sell copies of the Software, and to
+ * distribute, sublicense, and/or sell copies of the Software, and to
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
  *
  * The above copyright notice and this permission notice (including the
- * next paragraph) shall be included in all copies or substantial portions
- * of the Software.
+ * next paragraph) shall be included in all copies or substantial
+ * portions of the Software.
  *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
- * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT.
- * IN NO EVENT SHALL PRECISION INSIGHT AND/OR ITS SUPPLIERS BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
- * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
- * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
+#include <errno.h>
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -91,6 +75,7 @@ struct vaapi_recorder {
 	int width, height;
 	int frame_count;
 
+	int error;
 	int destroying;
 	pthread_t worker_thread;
 	pthread_mutex_t mutex;
@@ -156,7 +141,7 @@ static void
 bitstream_start(struct bitstream *bs)
 {
 	bs->max_size_in_dword = BITSTREAM_ALLOCATE_STEPPING;
-	bs->buffer = calloc(bs->max_size_in_dword * sizeof(int), 1);
+	bs->buffer = calloc(bs->max_size_in_dword * sizeof(unsigned int), 1);
 	bs->bit_offset = 0;
 }
 
@@ -215,7 +200,7 @@ bitstream_put_ue(struct bitstream *bs, unsigned int val)
 		size_in_bits++;
 	}
 
-	bitstream_put_ui(bs, 0, size_in_bits - 1); // leading zero
+	bitstream_put_ui(bs, 0, size_in_bits - 1); /* leading zero */
 	bitstream_put_ui(bs, val, size_in_bits);
 }
 
@@ -759,7 +744,13 @@ encoder_create_output_buffer(struct vaapi_recorder *r)
 		return VA_INVALID_ID;
 }
 
-static int
+enum output_write_status {
+	OUTPUT_WRITE_SUCCESS,
+	OUTPUT_WRITE_OVERFLOW,
+	OUTPUT_WRITE_FATAL
+};
+
+static enum output_write_status
 encoder_write_output(struct vaapi_recorder *r, VABufferID output_buf)
 {
 	VACodedBufferSegment *segment;
@@ -768,19 +759,22 @@ encoder_write_output(struct vaapi_recorder *r, VABufferID output_buf)
 
 	status = vaMapBuffer(r->va_dpy, output_buf, (void **) &segment);
 	if (status != VA_STATUS_SUCCESS)
-		return -1;
+		return OUTPUT_WRITE_FATAL;
 
 	if (segment->status & VA_CODED_BUF_STATUS_SLICE_OVERFLOW_MASK) {
 		r->encoder.output_size *= 2;
 		vaUnmapBuffer(r->va_dpy, output_buf);
-		return -1;
+		return OUTPUT_WRITE_OVERFLOW;
 	}
 
 	count = write(r->output_fd, segment->buf, segment->size);
 
 	vaUnmapBuffer(r->va_dpy, output_buf);
 
-	return count;
+	if (count < 0)
+		return OUTPUT_WRITE_FATAL;
+
+	return OUTPUT_WRITE_SUCCESS;
 }
 
 static void
@@ -790,9 +784,8 @@ encoder_encode(struct vaapi_recorder *r, VASurfaceID input)
 
 	VABufferID buffers[8];
 	int count = 0;
-
-	int slice_type;
-	int ret, i;
+	int i, slice_type;
+	enum output_write_status ret;
 
 	if ((r->frame_count % r->encoder.intra_period) == 0)
 		slice_type = SLICE_TYPE_I;
@@ -827,7 +820,10 @@ encoder_encode(struct vaapi_recorder *r, VASurfaceID input)
 		output_buf = VA_INVALID_ID;
 
 		vaDestroyBuffer(r->va_dpy, buffers[--count]);
-	} while (ret < 0);
+	} while (ret == OUTPUT_WRITE_OVERFLOW);
+
+	if (ret == OUTPUT_WRITE_FATAL)
+		r->error = errno;
 
 	for (i = 0; i < count; i++)
 		vaDestroyBuffer(r->va_dpy, buffers[i]);
@@ -936,20 +932,19 @@ vaapi_recorder_create(int drm_fd, int width, int height, const char *filename)
 	int major, minor;
 	int flags;
 
-	r = calloc(1, sizeof *r);
-	if (!r)
+	r = zalloc(sizeof *r);
+	if (r == NULL)
 		return NULL;
 
 	r->width = width;
 	r->height = height;
 	r->drm_fd = drm_fd;
 
-	flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
-	r->output_fd = open(filename, flags, 0644);
-
 	if (setup_worker_thread(r) < 0)
 		goto err_free;
 
+	flags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+	r->output_fd = open(filename, flags, 0644);
 	if (r->output_fd < 0)
 		goto err_thread;
 
@@ -1137,10 +1132,18 @@ worker_thread_function(void *data)
 	return NULL;
 }
 
-void
+int
 vaapi_recorder_frame(struct vaapi_recorder *r, int prime_fd, int stride)
 {
+	int ret = 0;
+
 	pthread_mutex_lock(&r->mutex);
+
+	if (r->error) {
+		errno = r->error;
+		ret = -1;
+		goto unlock;
+	}
 
 	/* The mutex is never released while encoding, so this point should
 	 * never be reached if input.valid is true. */
@@ -1151,5 +1154,8 @@ vaapi_recorder_frame(struct vaapi_recorder *r, int prime_fd, int stride)
 	r->input.valid = 1;
 	pthread_cond_signal(&r->input_cond);
 
+unlock:
 	pthread_mutex_unlock(&r->mutex);
+
+	return ret;
 }

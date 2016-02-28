@@ -2,23 +2,24 @@
  * Copyright © 2011 Benjamin Franzke
  * Copyright © 2010 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
 
 #include <config.h>
@@ -33,15 +34,23 @@
 #include <signal.h>
 
 #include <wayland-client.h>
-#include "../shared/os-compatibility.h"
+#include "shared/os-compatibility.h"
+#include "xdg-shell-unstable-v5-client-protocol.h"
+#include "fullscreen-shell-unstable-v1-client-protocol.h"
+
+#include <sys/types.h>
+#include "ivi-application-client-protocol.h"
+#define IVI_SURFACE_ID 9000
 
 struct display {
 	struct wl_display *display;
 	struct wl_registry *registry;
 	struct wl_compositor *compositor;
-	struct wl_shell *shell;
+	struct xdg_shell *shell;
+	struct zwp_fullscreen_shell_v1 *fshell;
 	struct wl_shm *shm;
 	uint32_t formats;
+	struct ivi_application *ivi_application;
 };
 
 struct buffer {
@@ -54,11 +63,14 @@ struct window {
 	struct display *display;
 	int width, height;
 	struct wl_surface *surface;
-	struct wl_shell_surface *shell_surface;
+	struct xdg_surface *xdg_surface;
+	struct ivi_surface *ivi_surface;
 	struct buffer buffers[2];
 	struct buffer *prev_buffer;
 	struct wl_callback *callback;
 };
+
+static int running = 1;
 
 static void
 buffer_release(void *data, struct wl_buffer *buffer)
@@ -111,27 +123,33 @@ create_shm_buffer(struct display *display, struct buffer *buffer,
 }
 
 static void
-handle_ping(void *data, struct wl_shell_surface *shell_surface,
-							uint32_t serial)
+handle_configure(void *data, struct xdg_surface *surface,
+		 int32_t width, int32_t height,
+		 struct wl_array *states, uint32_t serial)
 {
-	wl_shell_surface_pong(shell_surface, serial);
+	xdg_surface_ack_configure(surface, serial);
 }
 
 static void
-handle_configure(void *data, struct wl_shell_surface *shell_surface,
-		 uint32_t edges, int32_t width, int32_t height)
+handle_delete(void *data, struct xdg_surface *xdg_surface)
 {
+	running = 0;
 }
 
-static void
-handle_popup_done(void *data, struct wl_shell_surface *shell_surface)
-{
-}
-
-static const struct wl_shell_surface_listener shell_surface_listener = {
-	handle_ping,
+static const struct xdg_surface_listener xdg_surface_listener = {
 	handle_configure,
-	handle_popup_done
+	handle_delete,
+};
+
+static void
+handle_ivi_surface_configure(void *data, struct ivi_surface *ivi_surface,
+			     int32_t width, int32_t height)
+{
+	/* Simple-shm is resizable */
+}
+
+static const struct ivi_surface_listener ivi_surface_listener = {
+	handle_ivi_surface_configure,
 };
 
 static struct window *
@@ -148,16 +166,40 @@ create_window(struct display *display, int width, int height)
 	window->width = width;
 	window->height = height;
 	window->surface = wl_compositor_create_surface(display->compositor);
-	window->shell_surface = wl_shell_get_shell_surface(display->shell,
-							   window->surface);
 
-	if (window->shell_surface)
-		wl_shell_surface_add_listener(window->shell_surface,
-					      &shell_surface_listener, window);
+	if (display->shell) {
+		window->xdg_surface =
+			xdg_shell_get_xdg_surface(display->shell,
+						  window->surface);
 
-	wl_shell_surface_set_title(window->shell_surface, "simple-shm");
+		assert(window->xdg_surface);
 
-	wl_shell_surface_set_toplevel(window->shell_surface);
+		xdg_surface_add_listener(window->xdg_surface,
+					 &xdg_surface_listener, window);
+
+		xdg_surface_set_title(window->xdg_surface, "simple-shm");
+
+	} else if (display->fshell) {
+		zwp_fullscreen_shell_v1_present_surface(display->fshell,
+							window->surface,
+							ZWP_FULLSCREEN_SHELL_V1_PRESENT_METHOD_DEFAULT,
+							NULL);
+	} else if (display->ivi_application ) {
+		uint32_t id_ivisurf = IVI_SURFACE_ID + (uint32_t)getpid();
+		window->ivi_surface =
+			ivi_application_surface_create(display->ivi_application,
+						       id_ivisurf, window->surface);
+		if (window->ivi_surface == NULL) {
+			fprintf(stderr, "Failed to create ivi_client_surface\n");
+			abort();
+		}
+
+		ivi_surface_add_listener(window->ivi_surface,
+					 &ivi_surface_listener, window);
+
+	} else {
+		assert(0);
+	}
 
 	return window;
 }
@@ -173,7 +215,8 @@ destroy_window(struct window *window)
 	if (window->buffers[1].buffer)
 		wl_buffer_destroy(window->buffers[1].buffer);
 
-	wl_shell_surface_destroy(window->shell_surface);
+	if (window->xdg_surface)
+		xdg_surface_destroy(window->xdg_surface);
 	wl_surface_destroy(window->surface);
 	free(window);
 }
@@ -301,6 +344,22 @@ struct wl_shm_listener shm_listener = {
 };
 
 static void
+xdg_shell_ping(void *data, struct xdg_shell *shell, uint32_t serial)
+{
+	xdg_shell_pong(shell, serial);
+}
+
+static const struct xdg_shell_listener xdg_shell_listener = {
+	xdg_shell_ping,
+};
+
+#define XDG_VERSION 5 /* The version of xdg-shell that we implement */
+#ifdef static_assert
+static_assert(XDG_VERSION == XDG_SHELL_VERSION_CURRENT,
+	      "Interface version doesn't match implementation version");
+#endif
+
+static void
 registry_handle_global(void *data, struct wl_registry *registry,
 		       uint32_t id, const char *interface, uint32_t version)
 {
@@ -310,13 +369,23 @@ registry_handle_global(void *data, struct wl_registry *registry,
 		d->compositor =
 			wl_registry_bind(registry,
 					 id, &wl_compositor_interface, 1);
-	} else if (strcmp(interface, "wl_shell") == 0) {
+	} else if (strcmp(interface, "xdg_shell") == 0) {
 		d->shell = wl_registry_bind(registry,
-					    id, &wl_shell_interface, 1);
+					    id, &xdg_shell_interface, 1);
+		xdg_shell_use_unstable_version(d->shell, XDG_VERSION);
+		xdg_shell_add_listener(d->shell, &xdg_shell_listener, d);
+	} else if (strcmp(interface, "zwp_fullscreen_shell_v1") == 0) {
+		d->fshell = wl_registry_bind(registry,
+					     id, &zwp_fullscreen_shell_v1_interface, 1);
 	} else if (strcmp(interface, "wl_shm") == 0) {
 		d->shm = wl_registry_bind(registry,
 					  id, &wl_shm_interface, 1);
 		wl_shm_add_listener(d->shm, &shm_listener, d);
+	}
+	else if (strcmp(interface, "ivi_application") == 0) {
+		d->ivi_application =
+			wl_registry_bind(registry, id,
+					 &ivi_application_interface, 1);
 	}
 }
 
@@ -356,13 +425,51 @@ create_display(void)
 
 	wl_display_roundtrip(display->display);
 
+	/*
+	 * Why do we need two roundtrips here?
+	 *
+	 * wl_display_get_registry() sends a request to the server, to which
+	 * the server replies by emitting the wl_registry.global events.
+	 * The first wl_display_roundtrip() sends wl_display.sync. The server
+	 * first processes the wl_display.get_registry which includes sending
+	 * the global events, and then processes the sync. Therefore when the
+	 * sync (roundtrip) returns, we are guaranteed to have received and
+	 * processed all the global events.
+	 *
+	 * While we are inside the first wl_display_roundtrip(), incoming
+	 * events are dispatched, which causes registry_handle_global() to
+	 * be called for each global. One of these globals is wl_shm.
+	 * registry_handle_global() sends wl_registry.bind request for the
+	 * wl_shm global. However, wl_registry.bind request is sent after
+	 * the first wl_display.sync, so the reply to the sync comes before
+	 * the initial events of the wl_shm object.
+	 *
+	 * The initial events that get sent as a reply to binding to wl_shm
+	 * include wl_shm.format. These tell us which pixel formats are
+	 * supported, and we need them before we can create buffers. They
+	 * don't change at runtime, so we receive them as part of init.
+	 *
+	 * When the reply to the first sync comes, the server may or may not
+	 * have sent the initial wl_shm events. Therefore we need the second
+	 * wl_display_roundtrip() call here.
+	 *
+	 * The server processes the wl_registry.bind for wl_shm first, and
+	 * the second wl_display.sync next. During our second call to
+	 * wl_display_roundtrip() the initial wl_shm events are received and
+	 * processed. Finally, when the reply to the second wl_display.sync
+	 * arrives, it guarantees we have processed all wl_shm initial events.
+	 *
+	 * This sequence contains two examples on how wl_display_roundtrip()
+	 * can be used to guarantee, that all reply events to a request
+	 * have been received and processed. This is a general Wayland
+	 * technique.
+	 */
+
 	if (!(display->formats & (1 << WL_SHM_FORMAT_XRGB8888))) {
 		fprintf(stderr, "WL_SHM_FORMAT_XRGB32 not available\n");
 		exit(1);
 	}
 
-	wl_display_get_fd(display->display);
-	
 	return display;
 }
 
@@ -373,7 +480,10 @@ destroy_display(struct display *display)
 		wl_shm_destroy(display->shm);
 
 	if (display->shell)
-		wl_shell_destroy(display->shell);
+		xdg_shell_destroy(display->shell);
+
+	if (display->fshell)
+		zwp_fullscreen_shell_v1_release(display->fshell);
 
 	if (display->compositor)
 		wl_compositor_destroy(display->compositor);
@@ -383,8 +493,6 @@ destroy_display(struct display *display)
 	wl_display_disconnect(display->display);
 	free(display);
 }
-
-static int running = 1;
 
 static void
 signal_int(int signum)
@@ -420,6 +528,12 @@ main(int argc, char **argv)
 		ret = wl_display_dispatch(display->display);
 
 	fprintf(stderr, "simple-shm exiting\n");
+
+	if (window->display->ivi_application) {
+		ivi_surface_destroy(window->ivi_surface);
+		ivi_application_destroy(window->display->ivi_application);
+	}
+
 	destroy_window(window);
 	destroy_display(display);
 

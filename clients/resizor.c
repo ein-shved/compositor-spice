@@ -1,24 +1,27 @@
 /*
  * Copyright © 2010 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -77,17 +80,20 @@ frame_callback(void *data, struct wl_callback *callback, uint32_t time)
 
 	assert(!callback || callback == resizor->frame_callback);
 
+	if (resizor->frame_callback) {
+		wl_callback_destroy(resizor->frame_callback);
+		resizor->frame_callback = NULL;
+	}
+
+	if (window_is_maximized(resizor->window))
+		return;
+
 	spring_update(&resizor->width);
 	spring_update(&resizor->height);
 
 	widget_schedule_resize(resizor->widget,
 			       resizor->width.current + 0.5,
 			       resizor->height.current + 0.5);
-
-	if (resizor->frame_callback) {
-		wl_callback_destroy(resizor->frame_callback);
-		resizor->frame_callback = NULL;
-	}
 
 	if (!spring_done(&resizor->width) || !spring_done(&resizor->height)) {
 		resizor->frame_callback =
@@ -195,7 +201,7 @@ key_handler(struct window *window, struct input *input, uint32_t time,
 }
 
 static void
-menu_func(struct window *window, int index, void *user_data)
+menu_func(void *data, struct input *input, int index)
 {
 	fprintf(stderr, "picked entry %d\n", index);
 }
@@ -235,7 +241,7 @@ resizor_create(struct display *display)
 
 	resizor = xzalloc(sizeof *resizor);
 	resizor->window = window_create(display);
-	resizor->widget = frame_create(resizor->window, resizor);
+	resizor->widget = window_frame_create(resizor->window, resizor);
 	window_set_title(resizor->window, "Wayland Resizor");
 	resizor->display = display;
 

@@ -2,24 +2,27 @@
  * Copyright © 2008 Kristian Høgsberg
  * Copyright © 2012 Intel Corporation
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -38,7 +41,6 @@ struct transformed {
 	struct widget *widget;
 	int width, height;
 	int fullscreen;
-	enum wl_shell_surface_fullscreen_method fullscreen_method;
 };
 
 static void
@@ -97,16 +99,6 @@ fullscreen_handler(struct window *window, void *data)
 
 	transformed->fullscreen ^= 1;
 	window_set_fullscreen(window, transformed->fullscreen);
-}
-
-static void
-resize_handler(struct widget *widget, int width, int height, void *data)
-{
-	struct transformed *transformed = data;
-
-	if (transformed->fullscreen_method !=
-	    WL_SHELL_SURFACE_FULLSCREEN_METHOD_DEFAULT)
-		widget_set_size(widget, transformed->width, transformed->height);
 }
 
 static void
@@ -222,13 +214,12 @@ button_handler(struct widget *widget,
 }
 
 static void
-touch_handler(struct widget *widget, struct input *input, 
-		   uint32_t serial, uint32_t time, int32_t id, 
+touch_handler(struct widget *widget, struct input *input,
+		   uint32_t serial, uint32_t time, int32_t id,
 		   float x, float y, void *data)
 {
 	struct transformed *transformed = data;
-	window_touch_move(transformed->window, input, 
-			  display_get_serial(transformed->display));
+	window_move(transformed->window, input, display_get_serial(transformed->display));
 }
 
 static void
@@ -252,14 +243,9 @@ int main(int argc, char *argv[])
 	transformed.width = 500;
 	transformed.height = 250;
 	transformed.fullscreen = 0;
-	transformed.fullscreen_method =
-		WL_SHELL_SURFACE_FULLSCREEN_METHOD_DEFAULT;
 
 	for (i = 1; i < argc; i++) {
-		if (strcmp(argv[i], "-d") == 0) {
-			transformed.fullscreen_method =
-				WL_SHELL_SURFACE_FULLSCREEN_METHOD_DRIVER;
-		} else if (strcmp(argv[i], "-w") == 0) {
+		if (strcmp(argv[i], "-w") == 0) {
 			if (++i >= argc)
 				usage(EXIT_FAILURE);
 
@@ -287,13 +273,10 @@ int main(int argc, char *argv[])
 		window_add_widget(transformed.window, &transformed);
 
 	window_set_title(transformed.window, "Transformed");
-	window_set_fullscreen_method(transformed.window,
-				     transformed.fullscreen_method);
 
 	widget_set_transparent(transformed.widget, 0);
 	widget_set_default_cursor(transformed.widget, CURSOR_BLANK);
 
-	widget_set_resize_handler(transformed.widget, resize_handler);
 	widget_set_redraw_handler(transformed.widget, redraw_handler);
 	widget_set_button_handler(transformed.widget, button_handler);
 
@@ -308,6 +291,9 @@ int main(int argc, char *argv[])
 			       transformed.width, transformed.height);
 
 	display_run(d);
+	widget_destroy(transformed.widget);
+	window_destroy(transformed.window);
+	display_destroy(d);
 
 	return 0;
 }

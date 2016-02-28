@@ -1,3 +1,26 @@
+/*
+ * Copyright © 2013-2016 Yury Shvedov <shved@lvk.cs.msu.su>
+ *
+ * Permission to use, copy, modify, distribute, and sell this software and
+ * its documentation for any purpose is hereby granted without fee, provided
+ * that the above copyright notice appear in all copies and that both that
+ * copyright notice and this permission notice appear in supporting
+ * documentation, and that the name of the copyright holders not be used in
+ * advertising or publicity pertaining to distribution of the software
+ * without specific, written prior permission.  The copyright holders make
+ * no representations about the suitability of this software for any
+ * purpose.  It is provided "as is" without express or implied warranty.
+ *
+ * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS
+ * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS, IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ * SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+ * RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
+ * CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
+
+#include "config.h"
 #include <stdio.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -6,12 +29,11 @@
 #include <spice/qxl_dev.h>
 #include <spice.h>
 #include <spice/macros.h>
-#include <weston/compositor.h>
 #include <wayland-util.h>
 #include <unistd.h>
 
-#include "compositor-spice.h"
 #include "weston_spice_interfaces.h"
+#include "compositor-spice.h"
 
 //Not actually need.
 QXLDevMemSlot slot = {
@@ -42,7 +64,7 @@ static struct {
     (commands.end >= commands.start) )
 
 static int
-push_command (spice_compositor_t *qxl, QXLCommandExt *cmd)
+push_command (spice_backend_t *qxl, QXLCommandExt *cmd)
 {
     int i = 0;
     int count;
@@ -67,7 +89,7 @@ static void
 weston_spice_attache_worker (QXLInstance *sin, QXLWorker *qxl_worker)
 {
     static int count = 0;
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     if (++count > 1) { //Only one worker per session
         dprint(1, "ignored");
@@ -81,7 +103,7 @@ weston_spice_attache_worker (QXLInstance *sin, QXLWorker *qxl_worker)
 static void
 weston_spice_set_compression_level (QXLInstance *sin, int level)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -90,7 +112,7 @@ weston_spice_set_compression_level (QXLInstance *sin, int level)
 static void
 weston_spice_set_mm_time(QXLInstance *sin, uint32_t mm_time)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -99,7 +121,7 @@ weston_spice_set_mm_time(QXLInstance *sin, uint32_t mm_time)
 static void
 weston_spice_get_init_info(QXLInstance *sin, QXLDevInitInfo *info)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -114,7 +136,7 @@ weston_spice_get_init_info(QXLInstance *sin, QXLDevInitInfo *info)
 static int
 weston_spice_get_command(QXLInstance *sin, struct QXLCommandExt *ext)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
     int count = commands.end - commands.start;
 
     memset (ext,0,sizeof(*ext));
@@ -138,7 +160,7 @@ weston_spice_get_command(QXLInstance *sin, struct QXLCommandExt *ext)
 static int
 weston_spice_req_cmd_notification(QXLInstance *sin)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -151,7 +173,7 @@ static void
 weston_spice_release_resource(QXLInstance *sin,
                                        struct QXLReleaseInfoExt info)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
     struct spice_release_info *ri;
 
     assert (info.group_id == MEMSLOT_GROUP);
@@ -164,7 +186,7 @@ weston_spice_release_resource(QXLInstance *sin,
 
 /*
  * copy-paste from
- * spice/server/tests/test_display_base.c
+ * spice/server/tests/test_display_base.b
  *
  * from here
  */
@@ -210,7 +232,7 @@ struct cursor_cmd {
 static int
 weston_spice_get_cursor_command(QXLInstance *sin, struct QXLCommandExt *ext)
 {
-    spice_compositor_t *c = wl_container_of(sin, c, display_sin);
+    spice_backend_t *b = wl_container_of(sin, b, display_sin);
     static int set = TRUE;
     struct cursor_cmd *cmd;
     static wl_fixed_t x = 0, y = 0;
@@ -219,12 +241,12 @@ weston_spice_get_cursor_command(QXLInstance *sin, struct QXLCommandExt *ext)
     //Not used for now.
     return FALSE;
 
-    /*if (!c->core_seat.has_pointer) {
+    /*if (!b->core_seat.has_pointer) {
         return FALSE;
     }
 * looks like it depricated
     */
-//    pointer = c->core_seat.pointer;
+//    pointer = b->core_seat.pointer;
 
     if ( !set &&
             x == pointer->x &&
@@ -269,7 +291,7 @@ weston_spice_get_cursor_command(QXLInstance *sin, struct QXLCommandExt *ext)
 static int
 weston_spice_req_cursor_notification(QXLInstance *sin)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -283,7 +305,7 @@ weston_spice_req_cursor_notification(QXLInstance *sin)
 static void
 weston_spice_notify_update(QXLInstance *sin, uint32_t update_id)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -293,7 +315,7 @@ weston_spice_notify_update(QXLInstance *sin, uint32_t update_id)
 static int
 weston_spice_flush_resources(QXLInstance *sin)
 {
-    spice_compositor_t *qxl = wl_container_of(sin, qxl, display_sin);
+    spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
     dprint(3, "called");
 
@@ -322,7 +344,7 @@ static QXLInterface weston_qxl_interface = {
 };
 
 void
-weston_spice_qxl_init (spice_compositor_t *qxl)
+weston_spice_qxl_init (spice_backend_t *qxl)
 {
     static int qxl_count = 0;
 
@@ -337,7 +359,7 @@ weston_spice_qxl_init (spice_compositor_t *qxl)
     qxl->push_command = push_command;
 }
 void
-weston_spice_qxl_destroy (spice_compositor_t *c)
+weston_spice_qxl_destroy (spice_backend_t *b)
 {
     struct spice_release_info *ri;
     QXLReleaseInfo *info;

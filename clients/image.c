@@ -2,24 +2,27 @@
  * Copyright © 2008 Kristian Høgsberg
  * Copyright © 2009 Chris Wilson
  *
- * Permission to use, copy, modify, distribute, and sell this software and its
- * documentation for any purpose is hereby granted without fee, provided that
- * the above copyright notice appear in all copies and that both that copyright
- * notice and this permission notice appear in supporting documentation, and
- * that the name of the copyright holders not be used in advertising or
- * publicity pertaining to distribution of the software without specific,
- * written prior permission.  The copyright holders make no representations
- * about the suitability of this software for any purpose.  It is provided "as
- * is" without express or implied warranty.
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
  *
- * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
- * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
- * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
- * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
- * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
- * OF THIS SOFTWARE.
+ * The above copyright notice and this permission notice (including the next
+ * paragraph) shall be included in all copies or substantial portions of the
+ * Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
  */
+
+#include "config.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -38,7 +41,7 @@
 #include <wayland-client.h>
 
 #include "window.h"
-#include "../shared/cairo-util.h"
+#include "shared/cairo-util.h"
 
 struct image {
 	struct window *window;
@@ -90,7 +93,7 @@ clamp_view(struct image *image)
 			image->matrix.x0 = allocation.width - sw;
 	}
 
-	if (sh < allocation.width) {
+	if (sh < allocation.height) {
 		image->matrix.y0 =
 			(allocation.height - image->height * scale) / 2;
 	} else {
@@ -336,7 +339,7 @@ fullscreen_handler(struct window *window, void *data)
 }
 
 static void
-close_handler(struct window *window, void *data)
+close_handler(void *data)
 {
 	struct image *image = data;
 
@@ -356,7 +359,7 @@ image_create(struct display *display, const char *filename,
 	     int *image_counter)
 {
 	struct image *image;
-	char *b, *copy, title[512];;
+	char *b, *copy, title[512];
 
 	image = zalloc(sizeof *image);
 	if (image == NULL)
@@ -371,14 +374,13 @@ image_create(struct display *display, const char *filename,
 	image->image = load_cairo_surface(filename);
 
 	if (!image->image) {
-		fprintf(stderr, "could not find the image %s!\n", b);
 		free(image->filename);
 		free(image);
 		return NULL;
 	}
 
 	image->window = window_create(display);
-	image->widget = frame_create(image->window, image);
+	image->widget = window_frame_create(image->window, image);
 	window_set_title(image->window, title);
 	image->display = display;
 	image->image_counter = image_counter;
@@ -410,6 +412,11 @@ main(int argc, char *argv[])
 	int i;
 	int image_counter = 0;
 
+	if (argc <= 1 || argv[1][0]=='-') {
+		printf("Usage: %s image...\n", argv[0]);
+		return 1;
+	}
+
 	d = display_create(&argc, argv);
 	if (d == NULL) {
 		fprintf(stderr, "failed to create display: %m\n");
@@ -421,6 +428,8 @@ main(int argc, char *argv[])
 
 	if (image_counter > 0)
 		display_run(d);
+
+	display_destroy(d);
 
 	return 0;
 }
