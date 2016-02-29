@@ -287,7 +287,7 @@ rdp_peer_refresh_raw(pixman_region32_t *region, pixman_image_t *image, freerdp_p
 	cmd->codecID = 0;
 
 	for (i = 0; i < nrects; i++, rect++) {
-		weston_log("rect(%d,%d, %d,%d)\n", rect->x1, rect->y1, rect->x2, rect->y2);
+		/*weston_log("rect(%d,%d, %d,%d)\n", rect->x1, rect->y1, rect->x2, rect->y2);*/
 		cmd->destLeft = rect->x1;
 		cmd->destRight = rect->x2;
 		cmd->width = rect->x2 - rect->x1;
@@ -310,7 +310,7 @@ rdp_peer_refresh_raw(pixman_region32_t *region, pixman_image_t *image, freerdp_p
 			   subrect.y2 = top + cmd->height;
 			   pixman_image_flipped_subrect(&subrect, image, cmd->bitmapData);
 
-			   weston_log("*  sending (%d,%d, %d,%d)\n", subrect.x1, subrect.y1, subrect.x2, subrect.y2);
+			   /*weston_log("*  sending (%d,%d, %d,%d)\n", subrect.x1, subrect.y1, subrect.x2, subrect.y2); */
 			   update->SurfaceBits(peer->context, cmd);
 
 			   remainingHeight -= cmd->height;
@@ -328,8 +328,6 @@ rdp_peer_refresh_region(pixman_region32_t *region, freerdp_peer *peer)
 	RdpPeerContext *context = (RdpPeerContext *)peer->context;
 	struct rdp_output *output = context->rdpBackend->output;
 	rdpSettings *settings = peer->settings;
-
-    wl_log("sending to %s\n", peer->hostname)
 
 	if (settings->RemoteFxCodec)
 		rdp_peer_refresh_rfx(region, output->shadow_surface, peer);

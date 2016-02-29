@@ -300,14 +300,6 @@ if test "x$cairo_modules" = "xcairo-glesv2"; then
 AC_DEFINE([USE_CAIRO_GLESV2], [1], [Use the GLESv2 GL cairo backend])
 fi
 
-AC_ARG_ENABLE(monitor-renderer, [  --enable-monitor-renderer],,
-              enable_monitor_renderer=no)
-AM_CONDITIONAL(ENABLE_MONITOR_RENDERER, test x$enable_monitor_renderer = xyes)
-if test x$enable_monitor_renderer = xyes; then
-	AC_DEFINE([BUILD_MONITOR_RENDERER], [1], [Build renderer dump wrapper])
-fi
-
-
 PKG_CHECK_MODULES(PIXMAN, [pixman-1])
 PKG_CHECK_MODULES(PNG, [libpng])
 
