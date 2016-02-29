@@ -35,7 +35,6 @@
 #define WESTON_SPICE_BTN_RIGHT (1 << 1)
 
 #define DEFAULT_AXIS_STEP_DISTANCE wl_fixed_from_int(10)
-#define DEFAULT_MOVEMENT_STEP_DISTANCE wl_fixed_from_int(1)
 
 /* TODO ledstate getting
  * TODO free mouse and kbd interfaces
@@ -82,24 +81,21 @@ static void
 weston_mouse_motion (SpiceMouseInstance *sin, int dx, int dy, int dz,
         uint32_t buttons_state)
 {
-    struct weston_spice_mouse *mouse = container_of(sin, struct weston_spice_mouse, sin);
+    struct weston_spice_mouse *mouse = wl_container_of(sin, mouse, sin);
     struct spice_backend *b = mouse->b;
+    struct weston_pointer_motion_event motion_ev = {
+        WESTON_POINTER_MOTION_REL,0,0,
+        /* TODO is it necessary? */
+        wl_fixed_to_double(wl_fixed_from_int(dx)),
+        wl_fixed_to_double(wl_fixed_from_int(dy)),
+    };
     struct weston_pointer_axis_event axis_ev = {
         WL_POINTER_AXIS_VERTICAL_SCROLL,
-        dz*DEFAULT_AXIS_STEP_DISTANCE,
-        0, 0};
+        wl_fixed_from_int(dz),
+        0, 0
+    };
+    notify_motion(&b->core_seat, weston_compositor_get_time(), &motion_ev);
 
-
-    dprint (3, "called. delta: (%d,%d,%d), buttons: %x",
-            dx,dy,dz,buttons_state);
-    /*if (!b->core_seat.has_pointer) {
-        return;
-    }
-* look like it depricated
-    */
-    notify_motion_absolute(&b->core_seat, weston_compositor_get_time(),
-            DEFAULT_MOVEMENT_STEP_DISTANCE*dx,
-            DEFAULT_MOVEMENT_STEP_DISTANCE*dy );
     if (dz) {
         notify_axis (&b->core_seat, weston_compositor_get_time(),
                      &axis_ev);
@@ -109,7 +105,7 @@ weston_mouse_motion (SpiceMouseInstance *sin, int dx, int dy, int dz,
 static void
 weston_mouse_buttons (SpiceMouseInstance *sin, uint32_t buttons_state )
 {
-    struct weston_spice_mouse *mouse = container_of(sin, struct weston_spice_mouse, sin);
+    struct weston_spice_mouse *mouse = wl_container_of(sin, mouse, sin);
     struct spice_backend *b = mouse->b;
 
     /*if (!b->core_seat.has_pointer) {
@@ -187,7 +183,7 @@ static uint8_t escaped_map[256] = {
 static void
 weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
 {
-    struct weston_spice_kbd *kbd = container_of(sin, struct weston_spice_kbd, sin);
+    struct weston_spice_kbd *kbd = wl_container_of(sin, kbd, sin);
     struct spice_backend *b = kbd->b;
     enum wl_keyboard_key_state state;
 
