@@ -70,9 +70,8 @@ static int
 spice_output_repaint (struct weston_output *output_base,
         pixman_region32_t *damage)
 {
-    struct spice_backend *b = (struct spice_backend *)
-            output_base->compositor;
     struct spice_output *output = (struct spice_output *) output_base;
+    struct spice_backend *b = output->backend;
 
     dprint (3, "called");
 
@@ -252,11 +251,11 @@ weston_spice_input_init (struct spice_backend *b,
 static void
 spice_destroy (struct weston_compositor *ec)
 {
-    struct spice_backend *b = (struct spice_backend*) ec;
+    struct spice_backend *b = (struct spice_backend*) ec->backend;
 
     weston_compositor_shutdown (ec);
 
-    ec->renderer->destroy(ec);
+    //ec->renderer->destroy(ec);
     b->worker->stop (b->worker);
 
     /* TODO: after calling next line double free detect.

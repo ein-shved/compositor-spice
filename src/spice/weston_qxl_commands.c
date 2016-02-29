@@ -95,7 +95,7 @@ spice_create_primary_surface (struct spice_backend *b,
     surface.mem        = (uint64_t)data;
     surface.group_id   = MEMSLOT_GROUP;
 
-    b->worker->create_primary_surface(worker, surfaces_count, &surface);
+    worker->create_primary_surface(worker, surfaces_count, &surface);
 
     return surfaces_count++;
 }
