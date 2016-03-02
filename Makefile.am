@@ -398,22 +398,22 @@ spice_backend_la_LIBADD = $(COMPOSITOR_LIBS) \
 	$(SPICE_SERVER_LIBS) 			\
 	$(SPICE_PROTOCOL_LIBS)			\
 	libshared.la
-spice_backend_la_CFLAGS =				\
+spice_backend_la_CFLAGS =			\
 	$(COMPOSITOR_CFLAGS)			\
 	$(SPICE_SERVER_CFLAGS) 			\
 	$(SPICE_PROTOCOL_CFLAGS)		\
 	$(AM_CFLAGS)
 spice_backend_la_SOURCES = 			\
-    src/spice/compositor-spice.c          \
-    src/spice/compositor-spice.h          \
-    src/spice/compositor-spice-conf.h     \
-    src/spice/weston_basic_event_loop.c   \
-    src/spice/weston_basic_event_loop.h   \
-    src/spice/weston_spice_interfaces.h   \
-    src/spice/weston_input_interfaces.c   \
-    src/spice/weston_qxl_interface.c      \
-    src/spice/weston_qxl_commands.h       \
-    src/spice/weston_qxl_commands.c		  \
+	src/spice/compositor-spice.c          \
+	src/spice/compositor-spice.h          \
+	src/spice/compositor-spice-conf.h     \
+	src/spice/weston_basic_event_loop.c   \
+	src/spice/weston_basic_event_loop.h   \
+	src/spice/weston_spice_interfaces.h   \
+	src/spice/weston_input_interfaces.c   \
+	src/spice/weston_qxl_interface.c      \
+	src/spice/weston_qxl_commands.h       \
+	src/spice/weston_qxl_commands.c       \
 	shared/helpers.h
 endif
 
