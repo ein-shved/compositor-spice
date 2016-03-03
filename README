@@ -145,6 +145,8 @@ would be roughly like this:
 - rdp-backend (depends on freerdp)
 	+ screen-share
 
+- spice-backend (depends on spice-server and spice-protocol)
+
 - weston (the executable, not parallel-installable):
 	+ desktop shell
 	+ ivi-shell

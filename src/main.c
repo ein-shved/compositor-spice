@@ -305,6 +305,14 @@ usage(int error_code)
 		"\n");
 #endif
 
+#if defined(BUILD_SPICE_COMPOSITOR)
+	fprintf(stderr,
+		"Options for spice-backend.so:\n\n"
+		"  --host=ADDR\t\tThe address to bind\n"
+		"  --port=PORT\t\tThe port to listen on\n"
+		"\n");
+#endif
+
 #if defined(BUILD_RPI_COMPOSITOR) && defined(HAVE_BCM_HOST)
 	fprintf(stderr,
 		"Options for rpi-backend.so:\n\n"
