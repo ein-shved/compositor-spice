@@ -24,6 +24,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/time.h>
 
 #include <spice.h>
@@ -34,12 +35,12 @@
 #include "weston_basic_event_loop.h"
 #include "weston_qxl_commands.h"
 
-
 struct spice_backend_config {
     const char* addr;
     int flags;
     int port;
     int no_auth;
+    char *image_compression;
 };
 struct spice_output {
     struct weston_output base;
@@ -57,6 +58,7 @@ struct spice_output {
     struct SpiceTimer *wakeup_timer;
 };
 
+
 static void
 spice_output_start_repaint_loop(struct weston_output *output_base)
 {
@@ -72,8 +74,6 @@ spice_output_repaint (struct weston_output *output_base,
 {
     struct spice_output *output = (struct spice_output *) output_base;
     struct spice_backend *b = output->backend;
-
-    dprint (3, "called");
 
     output->base.compositor->renderer->repaint_output (output_base, damage);
 
@@ -208,10 +208,53 @@ err_core_interface:
     return NULL;
 }
 
-static void
+/* This will find corresponding integer representation of spice's compression
+ * type by it's string representation or return -1. This function is
+ * case insensitive.
+ */
+static int parse_spice_compression_name(const char *in_name)
+{
+    static const char *compression_names[] = {
+        [ SPICE_IMAGE_COMPRESS_OFF ]      = "off",
+        [ SPICE_IMAGE_COMPRESS_AUTO_GLZ ] = "auto_glz",
+        [ SPICE_IMAGE_COMPRESS_AUTO_LZ ]  = "auto_lz",
+        [ SPICE_IMAGE_COMPRESS_QUIC ]     = "quic",
+        [ SPICE_IMAGE_COMPRESS_GLZ ]      = "glz",
+        [ SPICE_IMAGE_COMPRESS_LZ ]       = "lz",
+    };
+
+    char *name = strdupa(in_name), *p;
+    int i = 0;
+
+    /* Make input lowercase */
+    for(p=name; *p != '\0'; ++p) {
+        *p = tolower(*p);
+    }
+
+    for (i=0; i < ARRAY_LENGTH(compression_names); ++i){
+        if (compression_names[i] == NULL) {
+            continue;
+        }
+        if (!strcmp(name, compression_names[i])) {
+            return i;
+        }
+    }
+    return -1;
+};
+
+static int
 weston_spice_server_new (struct spice_backend *b,
         const struct spice_backend_config *config)
 {
+    int compression;
+    compression = SPICE_IMAGE_COMPRESS_AUTO_GLZ;
+    if (config->image_compression) {
+        compression = parse_spice_compression_name(config->image_compression);
+    }
+    if (compression < 0) {
+        return -1;
+    }
+
     //Init spice server
     b->spice_server = spice_server_new();
 
@@ -223,13 +266,16 @@ weston_spice_server_new (struct spice_backend *b,
         spice_server_set_noauth (b->spice_server);
     }
 
-    //TODO set another spice server options here
+    spice_server_set_image_compression(b->spice_server, compression);
 
+    //TODO set another spice server options here
     spice_server_init (b->spice_server, b->core);
 
     //qxl interface
     weston_spice_qxl_init (b);
     spice_server_add_interface (b->spice_server, &b->display_sin.base);
+
+    return 0;
 }
 
 static int
@@ -307,7 +353,9 @@ spice_backend_create (struct weston_compositor *compositor,
 	compositor->capabilities |= WESTON_CAP_ARBITRARY_MODES;
 
     b->core = basic_event_loop_init(compositor);
-    weston_spice_server_new (b, config);
+    if (weston_spice_server_new (b, config) < 0) {
+        goto err_server;
+    }
 
     weston_log ("Spice server is up on %s:%d\n", config->addr, config->port);
 
@@ -328,6 +376,7 @@ spice_backend_create (struct weston_compositor *compositor,
 err_output:
 err_input_init:
 err_compositor:
+err_server:
     free (b);
     return NULL;
 }
@@ -343,11 +392,13 @@ backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
         .port = 5912,
         .flags = 0,
         .no_auth = 1,
+        .image_compression = NULL,
     };
 
     const struct weston_option spice_options[] = {
 		{ WESTON_OPTION_STRING,  "host", 0, &config.addr },
 		{ WESTON_OPTION_INTEGER, "port", 0, &config.port },
+		{ WESTON_OPTION_STRING,  "compression", 0, &config.image_compression },
         //TODO parse auth options here
 	};
 
