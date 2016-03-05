@@ -65,8 +65,8 @@ spice_output_start_repaint_loop(struct weston_output *output_base)
     struct spice_output *output = (struct spice_output*) output_base;
     struct spice_backend *b  = output->backend;
 
-    b->worker->start(b->worker);
-    b->core->timer_start ( b->primary_output->wakeup_timer, 5);
+    spice_server_vm_start(b->spice_server);
+    b->core->timer_start(b->primary_output->wakeup_timer, 5);
 }
 static int
 spice_output_repaint (struct weston_output *output_base,
@@ -106,14 +106,14 @@ spice_output_destroy ( struct weston_output *output_base)
 
 static void
 on_wakeup (void *opaque) {
-    struct spice_output *output = opaque;
+    struct spice_output *output = (struct spice_output *)opaque;
     struct spice_backend *b = output->backend;
 	struct timespec ts;
 
 	weston_compositor_read_presentation_clock(b->compositor, &ts);
 
-    b->worker->wakeup(b->worker);
     b->core->timer_start (output->wakeup_timer, 1);
+    spice_qxl_wakeup(&b->display_sin);
 
     weston_output_finish_frame (&output->base, &ts, 0);
     weston_output_schedule_repaint (&output->base);
@@ -224,7 +224,7 @@ static int parse_spice_compression_name(const char *in_name)
     };
 
     char *name = strdupa(in_name), *p;
-    int i = 0;
+    unsigned i = 0;
 
     /* Make input lowercase */
     for(p=name; *p != '\0'; ++p) {
@@ -302,7 +302,7 @@ spice_destroy (struct weston_compositor *ec)
     weston_compositor_shutdown (ec);
 
     //ec->renderer->destroy(ec);
-    b->worker->stop (b->worker);
+    spice_server_vm_stop(b->spice_server);
 
     /* TODO: after calling next line double free detect.
      * recognize, why?

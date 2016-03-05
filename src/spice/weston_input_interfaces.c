@@ -125,7 +125,6 @@ static struct SpiceMouseInterface weston_mouse_interface = {
     .buttons    = weston_mouse_buttons,
 };
 
-static char *weston_mouse_description = "weston mouse";
 void
 weston_spice_mouse_init (spice_backend_t *b)
 {

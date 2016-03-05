@@ -95,7 +95,7 @@ weston_spice_attache_worker (QXLInstance *sin, QXLWorker *qxl_worker)
         dprint(1, "ignored");
         return;
     }
-    qxl_worker->add_memslot(qxl_worker, &slot);
+    spice_qxl_add_memslot(&qxl->display_sin, &slot);
 
     dprint(3, "called, worker: %p", qxl_worker);
     qxl->worker = qxl_worker;
@@ -198,7 +198,7 @@ static struct {
     QXLCursor cursor;
     uint8_t data[CURSOR_WIDTH * CURSOR_HEIGHT * 4]; // 32bit per pixel
 } cursor;
-static void cursor_init()
+static void cursor_init(void)
 {
     cursor.cursor.header.unique = 0;
     cursor.cursor.header.type = SPICE_CURSOR_TYPE_COLOR32;

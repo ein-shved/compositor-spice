@@ -131,19 +131,19 @@ watch_add (int fd, int event_mask, SpiceWatchFunc func, void *opaque)
 
     return watch;
 }
-void
+static void
 watch_update_mask (SpiceWatch *watch, int event_mask)
 {
     wl_event_source_fd_update (watch->event_source, event_mask);
 }
-void
+static void
 watch_remove (SpiceWatch *watch)
 {
     wl_event_source_remove (watch->event_source);
     free (watch);
 }
 
-void
+static void
 channel_event (int event, SpiceChannelEventInfo *info)
 {
 }

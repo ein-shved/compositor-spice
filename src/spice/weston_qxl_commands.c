@@ -76,7 +76,6 @@ uint32_t
 spice_create_primary_surface (struct spice_backend *b,
         int width, int height, uint8_t *data)
 {
-    QXLWorker *worker = b->worker;
     QXLDevSurfaceCreate surface;
 
     assert (surfaces_count < NUM_SURFACES );
@@ -95,85 +94,10 @@ spice_create_primary_surface (struct spice_backend *b,
     surface.mem        = (uint64_t)data;
     surface.group_id   = MEMSLOT_GROUP;
 
-    worker->create_primary_surface(worker, surfaces_count, &surface);
+    spice_qxl_create_primary_surface(&b->display_sin, surfaces_count, &surface);
 
     return surfaces_count++;
 }
-static struct surface_create_cmd *
-spice_backend_create_surface_cmd (int width, int height,
-        uint32_t id, uint8_t *data )
-{
-    struct surface_create_cmd *surface_cmd;
-    QXLSurfaceCmd *qxl_cmd;
-
-    surface_cmd = malloc (sizeof *surface_cmd);
-    if (surface_cmd == NULL) {
-        goto err_surface_cmd_malloc;
-    }
-    qxl_cmd = &surface_cmd->cmd;
-    surface_cmd->base.destructor = release_simple;
-
-    set_cmd (&surface_cmd->ext, QXL_CMD_SURFACE, (intptr_t) qxl_cmd);
-    set_release_info (&qxl_cmd->release_info, (intptr_t) surface_cmd);
-    qxl_cmd->type   = QXL_SURFACE_CMD_CREATE;
-    qxl_cmd->flags  = 0;
-    qxl_cmd->surface_id = id;
-    qxl_cmd->u.surface_create.format    = SPICE_SURFACE_FMT_32_ARGB;
-    qxl_cmd->u.surface_create.width     = width;
-    qxl_cmd->u.surface_create.height    = height;
-    qxl_cmd->u.surface_create.stride    = -width * 4;
-    qxl_cmd->u.surface_create.data      = (intptr_t) data;
-
-    return surface_cmd;
-
-err_surface_cmd_malloc:
-    return NULL;
-    weston_log_error("NULL");
-}
-uint8_t *
-spice_backend_create_surface_empty ( struct spice_backend *b,
-        int width, int height, uint32_t *id )
-{
-    uint8_t *surface;
-    struct surface_create_cmd *surface_cmd;
-
-    if (surfaces_count >= NUM_SURFACES ) {
-        weston_log ("WARNING: surface number owerflow\n");
-        goto err_surfaces_num;
-    }
-    if ( b->push_command == NULL ) {
-        weston_log ("ERROR: no push command in spice compositor\n");
-        goto err_push_command;
-    }
-    if ( width > MAX_WIDTH || height > MAX_HEIGHT) {
-        goto err_max_params;
-    }
-    surface = malloc (width * height * 4 );
-    if (surface == NULL) {
-        goto err_surface_malloc;
-    }
-    memset (surface, 0, width * height * 4 );
-    *id = surfaces_count ++;
-
-    surface_cmd = spice_backend_create_surface_cmd ( width,
-                height, *id, surface);
-    if (surface_cmd == NULL) {
-        goto err_surface_cmd;
-    }
-    b->push_command (b, &surface_cmd->ext);
-
-    return surface;
-
-err_surface_cmd:
-    free (surface);
-err_surface_malloc:
-err_surfaces_num:
-err_push_command:
-err_max_params:
-    weston_log_error("NULL");
-    return NULL;
-}
-
 static void
 fill_clip_data (QXLDrawable *drawable, ClipList *clip_rects)
 {
@@ -302,57 +226,6 @@ spice_paint_image (struct spice_backend *b, uint32_t image_id,
 
 err_drawable:
     free (cmd);
-err_cmd_malloc:
-    return -1;
-}
-
-int //-1 - error
-spice_fill ( struct spice_backend *b,
-        color_t color, int x, int y, int width, int height )
-{
-    struct fill_cmd *cmd;
-    QXLDrawable *drawable;
-    QXLFill *fill;
-    uint32_t surface_id = spice_get_primary_surface_id (b);
-
-    cmd = calloc (sizeof *cmd, 1);
-    if ( cmd == NULL ) {
-        goto err_cmd_malloc;
-    }
-    drawable = &cmd->drawable;
-    fill = &drawable->u.fill;
-
-    drawable->surface_id = surface_id;
-    drawable->bbox.left = x;
-    drawable->bbox.right = x + width;
-    drawable->bbox.top = y;
-    drawable->bbox.bottom = y + height;
-
-    fill_clip_data (drawable, NULL);
-
-    cmd->base.destructor = release_simple;
-
-    drawable->effect            = QXL_EFFECT_OPAQUE;
-    set_release_info (&drawable->release_info, (intptr_t) cmd);
-    drawable->type              = QXL_DRAW_FILL;
-    drawable->surfaces_dest[0]  = -1;
-    drawable->surfaces_dest[1]  = -1;
-    drawable->surfaces_dest[2]  = -1;
-
-    fill->rop_descriptor    = SPICE_ROPD_OP_PUT;
-    fill->brush.type        = SPICE_BRUSH_TYPE_SOLID;
-    fill->brush.u.color     = color;
-    fill->mask.flags        = 0;
-    fill->mask.pos.x        = 0;
-    fill->mask.pos.y        = 0;
-    fill->mask.bitmap       = 0;
-
-    set_cmd (&cmd->ext, QXL_CMD_DRAW, (intptr_t)drawable);
-
-    b->push_command (b, &cmd->ext);
-
-    return 0;
-
 err_cmd_malloc:
     return -1;
 }
