@@ -212,17 +212,9 @@ err_core_interface:
  * type by it's string representation or return -1. This function is
  * case insensitive.
  */
-static int parse_spice_compression_name(const char *in_name)
+static int parse_spice_name(const char *in_name,
+        const char *names[], size_t len)
 {
-    static const char *compression_names[] = {
-        [ SPICE_IMAGE_COMPRESS_OFF ]      = "off",
-        [ SPICE_IMAGE_COMPRESS_AUTO_GLZ ] = "auto_glz",
-        [ SPICE_IMAGE_COMPRESS_AUTO_LZ ]  = "auto_lz",
-        [ SPICE_IMAGE_COMPRESS_QUIC ]     = "quic",
-        [ SPICE_IMAGE_COMPRESS_GLZ ]      = "glz",
-        [ SPICE_IMAGE_COMPRESS_LZ ]       = "lz",
-    };
-
     char *name = strdupa(in_name), *p;
     unsigned i = 0;
 
@@ -231,41 +223,60 @@ static int parse_spice_compression_name(const char *in_name)
         *p = tolower(*p);
     }
 
-    for (i=0; i < ARRAY_LENGTH(compression_names); ++i){
-        if (compression_names[i] == NULL) {
+    /* Search through names */
+    for (i=0; i < len; ++i){
+        /* Ignore empty fields */
+        if (names[i] == NULL) {
             continue;
         }
-        if (!strcmp(name, compression_names[i])) {
+        if (!strcmp(name, names[i])) {
             return i;
         }
     }
+    /* Failure at the end */
     return -1;
 };
+static const char *image_compression_names[] = {
+    [ SPICE_IMAGE_COMPRESS_OFF ]      = "off",
+    [ SPICE_IMAGE_COMPRESS_AUTO_GLZ ] = "auto_glz",
+    [ SPICE_IMAGE_COMPRESS_AUTO_LZ ]  = "auto_lz",
+    [ SPICE_IMAGE_COMPRESS_QUIC ]     = "quic",
+    [ SPICE_IMAGE_COMPRESS_GLZ ]      = "glz",
+    [ SPICE_IMAGE_COMPRESS_LZ ]       = "lz",
+};
+static inline spice_image_compression_t
+parse_spice_image_compression_name(const char *in_name) {
+    int res = parse_spice_name(in_name, image_compression_names,
+            ARRAY_LENGTH(image_compression_names));
+    return res < 0 ? SPICE_IMAGE_COMPRESS_INVALID :
+                        (spice_image_compression_t)res;
+}
 
 static int
 weston_spice_server_new (struct spice_backend *b,
         const struct spice_backend_config *config)
 {
-    int compression;
-    compression = SPICE_IMAGE_COMPRESS_AUTO_GLZ;
+    /* Choose image compression */
+    spice_image_compression_t compression = SPICE_IMAGE_COMPRESS_AUTO_GLZ;
     if (config->image_compression) {
-        compression = parse_spice_compression_name(config->image_compression);
+        compression = parse_spice_image_compression_name(
+                config->image_compression);
+        if (compression == SPICE_IMAGE_COMPRESS_INVALID) {
+            weston_log("Invalid image compression '%s'\n",
+                    config->image_compression);
+            return -1;
+        }
     }
-    if (compression < 0) {
-        return -1;
-    }
+    weston_log("Using image compression '%s'\n",
+            image_compression_names[compression]);
 
     //Init spice server
     b->spice_server = spice_server_new();
-
-    spice_server_set_addr (b->spice_server,
-                           config->addr, config->flags);
-    spice_server_set_port (b->spice_server,
-                           config->port );
+    spice_server_set_addr(b->spice_server, config->addr, config->flags);
+    spice_server_set_port(b->spice_server, config->port);
     if (config->no_auth) {
         spice_server_set_noauth (b->spice_server);
     }
-
     spice_server_set_image_compression(b->spice_server, compression);
 
     //TODO set another spice server options here
@@ -357,7 +368,8 @@ spice_backend_create (struct weston_compositor *compositor,
         goto err_server;
     }
 
-    weston_log ("Spice server is up on %s:%d\n", config->addr, config->port);
+    weston_log ("Spice server is up on %s:%d\n",
+            config->addr[0] == '\0' ? "*" : config->addr, config->port);
 
     if (weston_spice_input_init(b, config) < 0) {
         goto err_input_init;
