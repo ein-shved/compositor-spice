@@ -74,7 +74,7 @@ push_command (spice_backend_t *qxl, QXLCommandExt *cmd)
     while ( (count  = commands.end - commands.start) >= MAX_COMMAND_NUM) {
         //may be decremented from worker thread.
         if (i >= MAX_WAIT_ITERATIONS) {
-            dprint (1, "command que is full");
+            weston_log("Spice command queue overload");
             return FALSE;
         }
         ++i;
@@ -88,24 +88,25 @@ push_command (spice_backend_t *qxl, QXLCommandExt *cmd)
 static void
 weston_spice_attache_worker (QXLInstance *sin, QXLWorker *qxl_worker)
 {
-    static int count = 0;
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
-    if (++count > 1) { //Only one worker per session
-        dprint(1, "ignored");
+    if (qxl->worker != NULL) { //Only one worker per session
+        if (qxl->worker == qxl_worker) {
+            weston_log("Superfluous %s ignored", __func__);
+        } else {
+            weston_log("Superfluous %s with different worker ignored",
+                        __func__);
+        }
         return;
     }
     spice_qxl_add_memslot(&qxl->display_sin, &slot);
 
-    dprint(3, "called, worker: %p", qxl_worker);
     qxl->worker = qxl_worker;
 }
 static void
 weston_spice_set_compression_level (QXLInstance *sin, int level)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
-
-    dprint(3, "called");
 
     //FIXME implement
 }
@@ -114,16 +115,12 @@ weston_spice_set_mm_time(QXLInstance *sin, uint32_t mm_time)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
-    dprint(3, "called");
-
     qxl->mm_clock = mm_time;
 }
 static void
 weston_spice_get_init_info(QXLInstance *sin, QXLDevInitInfo *info)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
-
-    dprint(3, "called");
 
     memset (info,0,sizeof(*info));
 
@@ -140,8 +137,6 @@ weston_spice_get_command(QXLInstance *sin, struct QXLCommandExt *ext)
     int count = commands.end - commands.start;
 
     memset (ext,0,sizeof(*ext));
-
-    dprint(3, "called");
 
     if (count > 0) {
         *ext = *commands.vector[commands.start];
@@ -162,8 +157,6 @@ weston_spice_req_cmd_notification(QXLInstance *sin)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
-    dprint(3, "called");
-
     /* This and req_cursor_notification needed for
      * client showing
      */
@@ -178,8 +171,6 @@ weston_spice_release_resource(QXLInstance *sin,
 
     assert (info.group_id == MEMSLOT_GROUP);
     ri = (struct spice_release_info*)(unsigned long)info.info->id;
-
-    dprint(3, "called %p", ri);
 
     ri->destructor(ri);
 }
@@ -255,8 +246,6 @@ weston_spice_get_cursor_command(QXLInstance *sin, struct QXLCommandExt *ext)
         return FALSE;
     }
 
-    dprint(2, "called");
-
     x = pointer->x;
     y = pointer->y;
 
@@ -293,8 +282,6 @@ weston_spice_req_cursor_notification(QXLInstance *sin)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
-    dprint(3, "called");
-
     //FIXME implemet
 
     /* This and req_cmd_notification needed for
@@ -307,8 +294,6 @@ weston_spice_notify_update(QXLInstance *sin, uint32_t update_id)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
 
-    dprint(3, "called");
-
     //FIXME implemet
 
 }
@@ -316,8 +301,6 @@ static int
 weston_spice_flush_resources(QXLInstance *sin)
 {
     spice_backend_t *qxl = wl_container_of(sin, qxl, display_sin);
-
-    dprint(3, "called");
 
     //FIXME implemet
 
@@ -349,7 +332,7 @@ weston_spice_qxl_init (spice_backend_t *qxl)
     static int qxl_count = 0;
 
     if ( ++qxl_count > 1 ) {
-        eprint ("only one instance of qxl interface supported");
+        weston_log("Only one instance of qxl interface supported");
         exit(1);
     }
 

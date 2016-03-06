@@ -204,7 +204,7 @@ err_surface_malloc:
     free (output);
 err_output_malloc:
 err_core_interface:
-    weston_log_error("NULL");
+    weston_log("Failed to initialize spice compositor");
     return NULL;
 }
 

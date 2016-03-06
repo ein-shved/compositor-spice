@@ -44,13 +44,6 @@
 #define MAX_WIDTH 1024
 #define MAX_HEIGHT 480
 
-#define dprint(lvl, fmt, ...) \
-    if ((lvl) <= DEBUG) weston_log("%s: " fmt "\n", __func__, ## __VA_ARGS__)
-#define eprint(fmt, ...) \
-    weston_log ("%s ERROR: " fmt "\n", __func__, ## __VA_ARGS__)
-#define weston_log_error(err_str)\
-    weston_log("%s: error detected. %s returned.\n", __func__, (err_str));
-
 /* TODO: is it necessary to support
  * several instances of spice_backend?
  */

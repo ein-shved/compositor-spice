@@ -153,13 +153,6 @@ make_drawable (const QXLRect *bbox, uint32_t surface_id,
     drawable->u.copy.src_area.right     = clip_rects->extents.x2;
     drawable->u.copy.src_area.bottom    = clip_rects->extents.y2;
 
-    dprint (3, "damage: (%d,%d) (%d,%d) %lx",
-        clip_rects->extents.x1,
-        clip_rects->extents.y1,
-        clip_rects->extents.x2,
-        clip_rects->extents.y2,
-        (long unsigned) clip_rects->data );
-
     return 0;
 }
 

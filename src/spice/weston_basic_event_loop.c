@@ -61,8 +61,6 @@ timer_add(SpiceTimerFunc func, void *opaque)
 {
     SpiceTimer *timer;
 
-    dprint (3, "called");
-
     assert (loop != NULL);
 
     timer = calloc(sizeof(SpiceTimer), 1);

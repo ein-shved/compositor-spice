@@ -59,8 +59,6 @@ weston_mouse_button_notify (struct spice_backend *b,
     uint32_t buttons = mouse->buttons_state;
     enum wl_pointer_button_state state;
 
-    dprint(3, "buttons_state: %x, buttons: %x",
-            buttons_state, buttons);
 #define DELIVER_NOTIFY_BUTTON(mask, btn)\
     if ( !button_equal (buttons, buttons_state, mask ) ) { \
         state = buttons_state & mask ? \
@@ -111,7 +109,6 @@ weston_mouse_buttons (SpiceMouseInstance *sin, uint32_t buttons_state )
     /*if (!b->core_seat.has_pointer) {
         return;
     }*/
-    dprint (3, "called. Buttons: %x", buttons_state);
     weston_mouse_button_notify (b, mouse, buttons_state);
 }
 
@@ -132,7 +129,7 @@ weston_spice_mouse_init (spice_backend_t *b)
     struct weston_spice_mouse *mouse;
 
     if ( ++mouse_count > 1 ) {
-        eprint("only one instance of mouse interface is suported");
+        weston_log("Only one instance of mouse interface is supported");
         exit(1);
     }
 
@@ -190,7 +187,6 @@ weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
         return;
     }*/
     if (frag == 224) {
-        dprint (3, "escape called: %x", frag);
         kbd->escape = frag;
         return;
     }
@@ -200,14 +196,11 @@ weston_kbd_push_scan_frag (SpiceKbdInstance *sin, uint8_t frag)
     if (kbd->escape == 224) {
         kbd->escape = 0;
         if (escaped_map[frag] == 0) {
-            dprint(2, "escaped_map[%d] == 0\n", frag);
         }
         frag = escaped_map[frag] - 8;
     } else {
         frag += MIN_KEYCODE;
     }
-
-    dprint (3, "called: %x", frag);
 
     notify_key (&b->core_seat, weston_compositor_get_time(), frag,
                     state, STATE_UPDATE_AUTOMATIC );
@@ -239,7 +232,7 @@ weston_spice_kbd_init (spice_backend_t *b)
     struct weston_spice_kbd *kbd;
 
     if ( ++kbd_count > 1 ) {
-        eprint("only one instance of kbd interface is suported");
+        weston_log("Only one instance of kbd interface is suported");
         exit(1);
     }
 
@@ -247,13 +240,11 @@ weston_spice_kbd_init (spice_backend_t *b)
     kbd->sin.base.sif = &weston_kbd_interface.base;
     kbd->sin.st       = (SpiceKbdState*) kbd;
     kbd->b            = b;
-
-    if ( weston_seat_init_keyboard (&b->core_seat, NULL) < 0 ) {
-        dprint (1, "failed to init seat keyboard");
+    if(weston_seat_init_keyboard (&b->core_seat, NULL) < 0 ) {
+        weston_log ("Failed to init seat keyboard");
         return -1;
     }
     spice_server_add_interface (b->spice_server, &kbd->sin.base);
-
     b->kbd = kbd;
 
     return 0;
