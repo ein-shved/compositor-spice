@@ -250,7 +250,7 @@ AC_ARG_ENABLE([spice-compositor], [  --enable-spice-compositor],,
 AM_CONDITIONAL(ENABLE_SPICE_COMPOSITOR, test x$enable_spice_compositor = xyes)
 if test x$enable_spice_compositor = xyes; then
   AC_DEFINE([BUILD_SPICE_COMPOSITOR], [1], [Build the spice compositor])
-  PKG_CHECK_MODULES(SPICE_SERVER, [spice-server])
+  PKG_CHECK_MODULES(SPICE_SERVER, [spice-server >= 0.11.2])
   PKG_CHECK_MODULES(SPICE_PROTOCOL, [spice-protocol])
 fi
 
