@@ -413,7 +413,7 @@ backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
     const struct weston_option spice_options[] = {
 		{ WESTON_OPTION_STRING,  "host", 0, &config.addr },
 		{ WESTON_OPTION_INTEGER, "port", 0, &config.port },
-		{ WESTON_OPTION_STRING,  "compression", 0, &config.image_compression },
+		{ WESTON_OPTION_STRING,  "image-compression", 0, &config.image_compression },
         //TODO parse auth options here
 	};
 
