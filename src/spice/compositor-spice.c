@@ -243,6 +243,9 @@ static const char *image_compression_names[] = {
     [ SPICE_IMAGE_COMPRESS_QUIC ]     = "quic",
     [ SPICE_IMAGE_COMPRESS_GLZ ]      = "glz",
     [ SPICE_IMAGE_COMPRESS_LZ ]       = "lz",
+#if SPICE_SERVER_VERSION >= 0x000c06
+    [ SPICE_IMAGE_COMPRESS_LZ4 ]      = "lz4",
+#endif
 };
 static inline spice_image_compression_t
 parse_spice_image_compression_name(const char *in_name) {
