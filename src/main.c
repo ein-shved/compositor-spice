@@ -313,6 +313,10 @@ usage(int error_code)
  		"  --password=PWD\tThe password (auth disabled if not specified)\n"
 		"  --image-compression=[auto_glz|auto_lz|quic|glz|lz|lz4|off]\t\n"
 		"\tThe image compression (lossless). Default is auto_glz\n"
+		"  --jpeg-wan-compression=[auto|never|always]\t\n"
+		"\tThe wan image compression (lossy for slow links). Default is auto\n"
+		"  --zlib-glz-wan-compression=[auto|never|always]\t\n"
+		"\tThe wan image compression (lossy for slow links). Default is auto\n"
 		"\n");
 #endif
 

@@ -41,6 +41,8 @@ struct spice_backend_config {
     int port;
     char *password;
     char *image_compression;
+    char *jpeg_wan_compression;
+    char *zlib_glz_wan_compression;
 };
 struct spice_output {
     struct weston_output base;
@@ -255,6 +257,19 @@ parse_spice_image_compression_name(const char *in_name) {
                         (spice_image_compression_t)res;
 }
 
+static const char *wan_compression_names[] = {
+    [ SPICE_WAN_COMPRESSION_AUTO   ] = "auto",
+    [ SPICE_WAN_COMPRESSION_NEVER  ] = "never",
+    [ SPICE_WAN_COMPRESSION_ALWAYS ] = "always",
+};
+static inline spice_wan_compression_t
+parse_spice_wan_compression_name(const char *in_name) {
+    int res = parse_spice_name(in_name, wan_compression_names,
+            ARRAY_LENGTH(wan_compression_names));
+    return res < 0 ? SPICE_WAN_COMPRESSION_INVALID :
+                        (spice_wan_compression_t)res;
+}
+
 static int
 weston_spice_server_new (struct spice_backend *b,
         const struct spice_backend_config *config)
@@ -270,8 +285,34 @@ weston_spice_server_new (struct spice_backend *b,
             return -1;
         }
     }
-    weston_log("Using image compression '%s'\n",
+    weston_log("Setting image compression to '%s'\n",
             image_compression_names[compression]);
+
+    spice_wan_compression_t jpeg_wan_compr = SPICE_WAN_COMPRESSION_AUTO;
+    if (config->jpeg_wan_compression) {
+        jpeg_wan_compr = parse_spice_wan_compression_name(
+                config->jpeg_wan_compression);
+        if (jpeg_wan_compr == SPICE_WAN_COMPRESSION_INVALID) {
+            weston_log("Invalid jpeg wan compression '%s'\n",
+                    config->jpeg_wan_compression);
+            return -1;
+        }
+    }
+    weston_log("Setting jpeg wan compression to: '%s'\n",
+            wan_compression_names[jpeg_wan_compr]);
+
+    spice_wan_compression_t zlib_glz_wan_compr = SPICE_WAN_COMPRESSION_AUTO;
+    if (config->zlib_glz_wan_compression) {
+        zlib_glz_wan_compr = parse_spice_wan_compression_name(
+                config->zlib_glz_wan_compression);
+        if (zlib_glz_wan_compr == SPICE_WAN_COMPRESSION_INVALID) {
+            weston_log("Invalid zlib glz wan compression '%s'\n",
+                    config->zlib_glz_wan_compression);
+            return -1;
+        }
+    }
+    weston_log("Setting zlib glz wan compression to: '%s'\n",
+            wan_compression_names[zlib_glz_wan_compr]);
 
     //Init spice server
     b->spice_server = spice_server_new();
@@ -283,6 +324,8 @@ weston_spice_server_new (struct spice_backend *b,
         spice_server_set_noauth (b->spice_server);
     }
     spice_server_set_image_compression(b->spice_server, compression);
+    spice_server_set_jpeg_compression(b->spice_server, jpeg_wan_compr);
+    spice_server_set_zlib_glz_compression(b->spice_server, zlib_glz_wan_compr);
 
     //TODO set another spice server options here
     spice_server_init (b->spice_server, b->core);
@@ -410,6 +453,8 @@ backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
         .flags = 0,
         .password = NULL,
         .image_compression = NULL,
+        .jpeg_wan_compression = NULL,
+        .zlib_glz_wan_compression = NULL,
     };
 
     const struct weston_option spice_options[] = {
@@ -417,7 +462,8 @@ backend_init(struct weston_compositor *compositor, int *argc, char *argv[],
 		{ WESTON_OPTION_INTEGER, "port", 0, &config.port },
 		{ WESTON_OPTION_STRING,  "password", 0, &config.password },
 		{ WESTON_OPTION_STRING,  "image-compression", 0, &config.image_compression },
-        //TODO parse auth options here
+		{ WESTON_OPTION_STRING,  "jpeg-wan-compression", 0, &config.jpeg_wan_compression },
+		{ WESTON_OPTION_STRING,  "zlib-glz-wan-compression", 0, &config.zlib_glz_wan_compression },
 	};
 
     parse_options (spice_options, ARRAY_LENGTH (spice_options), argc, argv);
