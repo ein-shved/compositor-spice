@@ -327,6 +327,7 @@ weston_spice_server_new (struct spice_backend *b,
     spice_server_set_image_compression(b->spice_server, compression);
     spice_server_set_jpeg_compression(b->spice_server, jpeg_wan_compr);
     spice_server_set_zlib_glz_compression(b->spice_server, zlib_glz_wan_compr);
+    spice_server_set_agent_mouse(b->spice_server, 0);
 
     //TODO set another spice server options here
     spice_server_init (b->spice_server, b->core);
