@@ -406,7 +406,6 @@ spice_backend_la_CFLAGS =			\
 spice_backend_la_SOURCES = 			\
 	src/spice/compositor-spice.c          \
 	src/spice/compositor-spice.h          \
-	src/spice/compositor-spice-conf.h     \
 	src/spice/weston_basic_event_loop.c   \
 	src/spice/weston_basic_event_loop.h   \
 	src/spice/weston_spice_interfaces.h   \

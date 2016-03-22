@@ -23,8 +23,6 @@
 #ifndef _WESTON_SPICE_INTERFACES_
 #define _WESTON_SPICE_INTERFACES_
 
-#include "compositor-spice-conf.h"
-
 struct spice_release_info {
     void (*destructor) (struct spice_release_info *);
 };

@@ -30,7 +30,6 @@
 #include "compositor.h"
 #include "pixman-renderer.h"
 
-#include "compositor-spice-conf.h"
 #include "weston_spice_interfaces.h"
 
 #define NUM_MEMSLOTS        1
